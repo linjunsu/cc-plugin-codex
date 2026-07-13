@@ -1,0 +1,47 @@
+{
+  "name": "cc",
+  "version": "1.2.2",
+  "description": "Claude Code Plugin for Codex. Delegate reviews, investigations, tracked tasks, and inspect Claude tool logs from inside Codex.",
+  "author": {
+    "name": "linjunsu",
+    "email": "linjunsu11@gmail.com",
+    "url": "https://github.com/linjunsu"
+  },
+  "homepage": "https://github.com/linjunsu/cc-plugin-codex",
+  "repository": "https://github.com/linjunsu/cc-plugin-codex",
+  "license": "Apache-2.0",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "code-review",
+    "task-delegation",
+    "agent"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Claude Code",
+    "shortDescription": "Claude Code Plugin for Codex",
+    "longDescription": "Use Claude Code from inside Codex to run read-only reviews, adversarial design reviews, and tracked rescue tasks through a Claude-backed runtime with job status, results, and captured tool logs.",
+    "developerName": "linjunsu",
+    "category": "Coding",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/linjunsu/cc-plugin-codex",
+    "privacyPolicyURL": "https://github.com/linjunsu/cc-plugin-codex",
+    "termsOfServiceURL": "https://github.com/linjunsu/cc-plugin-codex",
+    "defaultPrompt": [
+      "Use Claude Code to review my current changes through $cc:review",
+      "Use Claude Code to investigate and fix this issue through $cc:rescue",
+      "Show the Claude Code tool log through $cc:log"
+    ],
+    "brandColor": "#7B39FE",
+    "composerIcon": "./assets/cc-small.svg",
+    "logo": "./assets/cc-plugin-codex.png",
+    "screenshots": [
+      "./assets/cc-plugin-codex-screenshot-1.png"
+    ]
+  }
+}

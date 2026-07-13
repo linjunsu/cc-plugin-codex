@@ -1,0 +1,5 @@
+interface:
+  display_name: "Claude Code Log"
+  short_description: "Args: [job-id], --tail <lines>, --all, --json. Show recent tool and execution log for a Claude Code job."
+policy:
+  allow_implicit_invocation: false

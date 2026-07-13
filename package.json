@@ -1,0 +1,57 @@
+{
+  "name": "cc-plugin-codex",
+  "version": "1.2.2",
+  "description": "Claude Code Plugin for Codex with tracked Claude Code jobs and tool logs",
+  "type": "module",
+  "author": {
+    "name": "linjunsu",
+    "email": "linjunsu11@gmail.com",
+    "url": "https://github.com/linjunsu"
+  },
+  "homepage": "https://github.com/linjunsu/cc-plugin-codex",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/linjunsu/cc-plugin-codex.git"
+  },
+  "bin": "scripts/installer-cli.mjs",
+  "bugs": {
+    "url": "https://github.com/linjunsu/cc-plugin-codex/issues"
+  },
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    ".codex-plugin",
+    "CHANGELOG.md",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "agents",
+    "assets",
+    "hooks",
+    "internal-skills",
+    "package.json",
+    "prompts",
+    "schemas",
+    "scripts",
+    "skills"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "check:changelog": "node scripts/check-changelog.mjs",
+    "check:version-sync": "node scripts/check-version-sync.mjs",
+    "check:syntax": "node --check scripts/claude-companion.mjs && node --check scripts/lib/claude-cli.mjs && node --check scripts/install-personal.mjs && node --check scripts/uninstall-personal.mjs",
+    "sync:plugin-version": "node scripts/sync-plugin-version.mjs",
+    "check": "npm run check:version-sync && npm run check:changelog && npm run check:syntax",
+    "install:codex": "node scripts/install-personal.mjs",
+    "prepack": "npm run check:version-sync && npm run check:changelog",
+    "setup:git-hooks": "node scripts/setup-git-hooks.mjs",
+    "test": "npm run check:syntax",
+    "uninstall:codex": "node scripts/uninstall-personal.mjs",
+    "update:codex": "node scripts/install-personal.mjs",
+    "version": "npm run sync:plugin-version && npm run check:version-sync && npm run check:changelog"
+  }
+}

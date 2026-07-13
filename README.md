@@ -223,11 +223,14 @@ Run the lightweight public-source checks:
 npm run check
 ```
 
-Validate the Codex plugin manifest:
+Run a local Codex install smoke test:
 
 ```bash
-python /path/to/plugin-creator/scripts/validate_plugin.py .
+node scripts/install-personal.mjs
+codex plugin list
 ```
+
+`plugin-creator`'s scaffold validator is not used as the release gate for this fork because it rejects the `hooks` manifest field. This plugin intentionally uses Codex native hooks for session cleanup, unread-result reminders, and the optional review gate.
 
 Useful direct checks:
 

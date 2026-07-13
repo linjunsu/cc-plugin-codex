@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.3.0
+
+- Turn `$cc:rescue` into an authorization-aware Codex supervision workflow with `diagnose`, `implement`, `publish`, and explicit `autonomous` modes.
+- Keep multi-step plans in Codex and execute one bounded todo checkpoint per Claude run with acceptance criteria, allowed paths, and verification commands.
+- Stop successful supervised runs in `awaiting_review`; add internal accept/reject controls so Codex must inspect the real diff and rerun verification before completion.
+- Add streaming JSON input and a cross-platform steer queue so Codex can correct a running Claude Code task without restarting its session.
+- Stream compact `[cc:event]` records for commands, files, mutation likelihood, and edit detail while suppressing token-fragment log noise.
+- Compare before/after Git snapshots to detect real working-tree, index, HEAD, and out-of-scope changes, including shell-driven mutations.
+- Block Claude Git staging/commit/push operations in supervised implementation and publish modes; Codex owns accepted commits and separately authorized remote writes.
+- Notify Codex about failed, cancelled, policy-failed, unknown, and awaiting-review jobs instead of surfacing only successful completions.
+- Add supervision tests for contracts, stream input, mutation classification, workspace policy, accept/reject transitions, and steer delivery.
+
 ## v1.2.2
 
 - Add `$cc:log` for tracked Claude Code jobs so Codex can inspect captured tool activity after or during a run.

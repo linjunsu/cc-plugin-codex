@@ -1,86 +1,154 @@
 ---
 name: rescue
-description: 'Delegate a substantial diagnosis, implementation, or follow-up task to Claude Code through the tracked-job runtime. Args include --background, --wait, --resume, --resume-last, --fresh, --write, --model MODEL, --effort LEVEL, --prompt-file PATH, and task text. Defaults to the user Claude Code profile unless overridden. Use when Claude should investigate or change things, not when the user only wants review findings.'
+description: 'Run a Claude Code diagnosis or implementation under active Codex supervision. Codex owns intent classification, todo boundaries, live monitoring, steering, independent verification, acceptance, and any final Git commit. Args include --mode, --background, --resume, --fresh, --model, --effort, and task text.'
 ---
 
-# Claude Code Rescue
+# Claude Code Rescue Under Codex Supervision
 
-Local runtime policy: run this skill from the main Codex thread. Do not spawn a Codex forwarding subagent for normal `$cc:rescue` requests.
+Run this skill from the main Codex thread. Do not spawn a forwarding subagent. Codex is the planner and acceptance authority; Claude Code is an execution worker.
 
-Use this skill when the user wants Claude Code to investigate, implement, debug, or continue substantial work. Do not use it for an ordinary "review this diff" request unless the user wants Claude Code to own follow-through work.
-
-Resolve `<plugin-root>` as two directories above this `SKILL.md` file. Always run the companion from that active plugin root:
+Resolve `<plugin-root>` as two directories above this `SKILL.md`. Run the companion from that active plugin root:
 
 ```bash
-node "<plugin-root>/scripts/claude-companion.mjs" task ...
+node "<plugin-root>/scripts/claude-companion.mjs" ...
 ```
 
 Raw slash-command arguments:
 `$ARGUMENTS`
 
-Supported arguments: `--background`, `--wait`, `--resume`, `--resume-last`, `--fresh`, `--write`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--prompt-file <path>`, plus free-text task text.
+## 1. Preserve User Authorization
 
-## Main-Thread Rules
+Classify the request before delegating:
 
-- If the user did not supply a task, ask what Claude Code should investigate or fix.
-- Do not inspect the repository, solve the task yourself, or summarize a fabricated result. The main thread only resolves routing, builds the companion command, runs it, and reports the companion result.
-- Treat `--background` and `--wait` as Codex-side execution controls only. Never forward either flag to `claude-companion.mjs task`.
-- Treat `--model`, `--effort`, `--resume`, `--resume-last`, `--fresh`, and `--prompt-file` as runtime controls, not task text.
-- Forward user-supplied `--model` and `--effort` unchanged to the companion command.
-- Default to `--write` unless the user explicitly wants read-only behavior or only review, diagnosis, or research without edits.
-- If the task text itself begins with a slash command such as `/simplify`, forward that slash command as literal Claude Code task text. Do not execute it locally or strip the slash.
-- If `--resume` or `--resume-last` is present, continue the latest tracked Claude Code task. If `--fresh` is present, start a new task.
-- If none of `--resume`, `--resume-last`, or `--fresh` is present, first run:
+- `diagnose`: why, investigate, inspect, explain, reproduce, research, or check without an explicit request to change code.
+- `implement`: fix, modify, implement, build, or otherwise make local changes.
+- `publish`: the user explicitly authorized push, PR creation, release, or another remote write.
+- `autonomous`: only when the user explicitly asks for unsupervised/background delegation or passes `--autonomous`.
 
-```bash
-node "<plugin-root>/scripts/claude-companion.mjs" task-resume-candidate --json
+Hard rules:
+
+- Words such as "why", "check", "investigate", and "use cc to look" are read-only diagnosis. Do not silently upgrade them to implementation.
+- Repository instructions such as `AGENTS.md` constrain how an authorized action is performed; they never grant permission to edit, commit, push, or publish.
+- `implement` allows Claude to edit and test. Claude must not stage, commit, push, reset, restore, stash, or rewrite history.
+- After all implementation todos pass Codex acceptance, Codex may create the local commit unless the user explicitly said not to commit. Claude never creates that commit.
+- Push, PR, release, deployment, and other external writes require explicit user authorization.
+- User flags override inference. Reject contradictory combinations such as `--mode diagnose --write`.
+
+## 2. Keep the Plan in Codex
+
+For a multi-step request, Codex must maintain the todo list using its plan facility when available. Each todo needs:
+
+- a stable ID such as `T1`;
+- one bounded task;
+- observable acceptance criteria;
+- allowed files or directories when they are known;
+- focused verification commands when they are known.
+
+Delegate exactly one todo per Claude run. Do not give Claude the whole plan and let it mark its own work complete. If the request is a single bounded task, synthesize one todo.
+
+When a structured plan already exists, stage a JSON contract outside the repository and pass `--contract-file`. Contract shape:
+
+```json
+{
+  "mode": "implement",
+  "activeTodoId": "T1",
+  "todos": [
+    {
+      "id": "T1",
+      "task": "Reproduce the sparse citation numbering bug",
+      "acceptance": ["A focused reproduction demonstrates 1,2,4,5"]
+    }
+  ],
+  "allowedPaths": ["server.js", "scripts/inline-citation-test.mjs"],
+  "verification": ["node scripts/inline-citation-test.mjs"]
+}
 ```
 
-- If that helper reports `available: true`, ask the user once whether to continue the current Claude Code thread or start a new one.
-- Use exactly these two choices when asking:
-  - `Continue current Claude Code thread`
-  - `Start a new Claude Code thread`
-- If the helper reports `available: false`, delegate normally.
+For a simple todo, the equivalent CLI flags are sufficient:
 
-## Command Building
+```bash
+node "<plugin-root>/scripts/claude-companion.mjs" task \
+  --mode implement \
+  --todo-id T1 \
+  --acceptance "focused regression passes" \
+  --allowed-paths "server.js,scripts/inline-citation-test.mjs" \
+  --verify "node scripts/inline-citation-test.mjs" \
+  --prompt-file "<absolute-prompt-file>"
+```
 
-Before starting the task, capture routing context:
+## 3. Reserve and Route the Job
+
+Before every task run:
 
 ```bash
 node "<plugin-root>/scripts/claude-companion.mjs" background-routing-context --kind task --json
 ```
 
-Use the returned values as internal companion flags:
+Use non-empty `ownerSessionId` and `jobId` values as `--owner-session-id` and `--job-id`. Add `--view-state on-success` for supervised foreground work.
 
-- If `ownerSessionId` is non-empty, add `--owner-session-id <ownerSessionId>`.
-- If `jobId` is non-empty, add `--job-id <jobId>`.
-- Add `--view-state on-success` for foreground execution.
-- Add `--view-state defer` for explicit `--background` execution.
-- Never emit an empty placeholder such as `--owner-session-id  --job-id`.
+If the task text is multi-line, long, contains quotes/backticks, or contains XML-style blocks, stage it in a temporary prompt file outside the repository and preserve it exactly.
 
-Prompt handling:
+`--resume` and `--resume-last` continue the latest Claude session. `--fresh` starts a new one. If none is supplied, use `task-resume-candidate --json`; ask whether to resume only when the candidate is genuinely the same user task. Do not resume unrelated work merely because a candidate exists.
 
-- Preserve the resolved task text apart from stripping routing flags.
-- If the resolved task text is multi-line, long, contains single quotes/backticks, or contains XML-style blocks such as `<task>`, stage it in a temporary prompt file outside the repository and pass it with `--prompt-file <absolute-path>`.
-- When staging a prompt file, preserve the exact task text byte-for-byte.
+## 4. Monitor and Intervene
 
-## Execution
+Supervised work is foreground-only. Run the companion directly with `exec_command`; if it yields a session ID, poll that same session with `write_stdin` until exit. Do not implement polling with `Start-Sleep` plus repeated `$cc:status` or `$cc:log` calls.
 
-Foreground is the default unless the user explicitly passed `--background`.
+The foreground stream emits compact `[cc:event]` JSON lines containing tool, command, file, mutation likelihood, and mutating-tool detail. Evaluate these events against the active todo while Claude runs.
 
-- Foreground: run the companion `task` command directly in the main thread with `exec_command`.
-- If `exec_command` returns `Process running with session ID ...`, keep polling that session with `write_stdin` until the command exits. Do not return early.
-- After the foreground command exits, return the companion's final result. Omit only unambiguous `[cc]` progress chatter.
-- If the task command output is only progress or otherwise unclear and a reserved `jobId` is available, retrieve the canonical result with:
+Intervene when an event shows scope drift, an unauthorized Git action, a skipped acceptance condition, or a material misunderstanding:
 
 ```bash
-node "<plugin-root>/scripts/claude-companion.mjs" result <jobId>
+node "<plugin-root>/scripts/claude-companion.mjs" steer <job-id> "<specific correction>"
 ```
 
-- Background: do not spawn a Codex subagent. Start the companion command from the main thread with `--view-state defer`, report the reserved job id when available, and tell the user to inspect it with `$cc:status` and `$cc:result <jobId>`.
+Use `steer` for correctable drift. Use `cancel <job-id>` for destructive, unauthorized, or unsafe behavior that should not continue. Codex should call these commands itself; do not make the user manually monitor `$cc:log`.
 
-## Output
+`$cc:log` remains a diagnostic fallback for historical detail. It is not the primary supervision mechanism.
 
-- Foreground: return Claude Code's result without paraphrasing it into a separate Codex answer.
-- Background: say `Claude Code rescue started in the background. Check $cc:status for progress, then open it with $cc:result <job-id>.`
-- If setup or authentication fails, report the companion error and direct the user to `$cc:setup`.
+## 5. Independently Verify Every Checkpoint
+
+Successful supervised Claude runs stop in `awaiting_review`, not `completed`.
+
+After the process exits:
+
+1. Read the canonical structured result:
+
+```bash
+node "<plugin-root>/scripts/claude-companion.mjs" result <job-id> --json
+```
+
+2. Inspect the actual workspace. At minimum check `git status --short --branch`, the relevant diff, changed-file scope, and whether Git HEAD or the index changed unexpectedly.
+3. Run the contract verification commands independently. Do not rely on Claude's statement that tests or builds passed.
+4. Compare the result with every acceptance criterion and the original user authorization.
+5. Accept only with concrete evidence:
+
+```bash
+node "<plugin-root>/scripts/claude-companion.mjs" accept <job-id> "diff inspected; focused test passed"
+```
+
+6. If verification fails, reject it:
+
+```bash
+node "<plugin-root>/scripts/claude-companion.mjs" reject <job-id> "missing browser build verification"
+```
+
+Then resume the same Claude session with a bounded correction for the same todo. Do not mark the Codex plan item complete until `accept` succeeds.
+
+For `diagnose`, verify that the workspace is unchanged and evaluate the evidence behind the root-cause claim before accepting.
+
+## 6. Complete the User Workflow
+
+After every todo is accepted:
+
+- Run one final cross-todo diff and verification audit.
+- For `diagnose`, report the verified cause and proposed fix; do not edit or commit.
+- For `implement`, Codex may create the local commit after acceptance unless the user explicitly prohibited commits. Stage only accepted task files and obey repository identity/checklist rules.
+- For `publish`, Codex performs the authorized commit/push/PR workflow and verifies remote state afterward.
+- Never describe an `awaiting_review`, `rejected`, `policy_failed`, `failed`, or cancelled job as complete.
+
+## 7. Autonomous Compatibility Mode
+
+`--autonomous` preserves one-shot delegation. It may be combined with explicit `--background`. State clearly that active semantic supervision and per-todo acceptance are disabled in this mode.
+
+Do not use autonomous mode merely for convenience or token savings when the user asked Codex to supervise.

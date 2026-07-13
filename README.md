@@ -5,7 +5,7 @@
 <h3 align="center">Claude Code Plugin for Codex</h3>
 
 <p align="center">
-  Run Claude Code reviews, rescue tasks, tracked jobs, and tool-log inspection from inside Codex.
+  Let Codex plan, supervise, steer, verify, and accept Claude Code work.
 </p>
 
 <p align="center">
@@ -22,12 +22,14 @@
 
 `cc-plugin-codex` lets Codex delegate work to Claude Code while Codex stays in charge of the user-facing thread.
 
-This public fork is based on Sendbird's Apache-2.0 `cc-plugin-codex` and keeps the same core command surface, with local changes focused on observability:
+This public fork is based on Sendbird's Apache-2.0 `cc-plugin-codex` and keeps the same core command surface, with local changes focused on supervised execution:
 
-- `$cc:rescue` runs from the main Codex thread by default and foreground jobs are polled until completion.
-- `$cc:log` shows tracked job logs, including captured tool inputs.
-- Job results include structured `toolUses`, `changedFiles`, and `touchedFiles` data when Claude Code emits tool calls.
-- Tool input capture summarizes shell commands, write/edit file paths, and edit old/new strings while redacting sensitive-looking values.
+- `$cc:rescue` preserves user authorization as `diagnose`, `implement`, `publish`, or explicit `autonomous` mode.
+- Codex owns the todo list and delegates one bounded checkpoint at a time.
+- Foreground jobs stream compact tool/command/file events and accept live steering from Codex.
+- Successful supervised runs stop at `awaiting_review`; Codex independently checks the real diff and verification before accepting them.
+- Claude cannot commit in supervised implementation/publish mode. Codex owns the final accepted commit, and remote writes still require explicit authorization.
+- Git snapshots detect real file, index, and HEAD changes even when shell commands bypass Claude's edit tools.
 
 It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc), but runs in the opposite direction: Codex hosts the plugin and Claude Code performs delegated work.
 
@@ -101,7 +103,7 @@ This removes `cc@personal` from Codex and removes the personal marketplace entry
 | --- | --- |
 | `$cc:review` | Read-only Claude Code review of your changes |
 | `$cc:adversarial-review` | Stronger review that challenges design, assumptions, and tradeoffs |
-| `$cc:rescue` | Delegate a diagnosis, fix, implementation, or follow-up task to Claude Code |
+| `$cc:rescue` | Run a diagnosis or implementation with Codex monitoring, steering, and acceptance |
 | `$cc:status` | List running and recent Claude Code jobs, or inspect one job |
 | `$cc:result` | Open the output of a finished tracked job |
 | `$cc:log` | Show the recent execution log for a tracked job |
@@ -112,8 +114,8 @@ Quick routing rule:
 
 - Use `$cc:review` for normal correctness review of a local diff.
 - Use `$cc:adversarial-review` when you want Claude to pressure-test the approach.
-- Use `$cc:rescue` when Claude should investigate, run commands, edit files, or own follow-through work.
-- Use `$cc:log` when you need to inspect what Claude Code is doing or did.
+- Use `$cc:rescue` when Claude should investigate or implement while Codex stays responsible for scope and correctness.
+- Use `$cc:log` only for historical detail; supervised rescue streams live events automatically.
 
 ### `$cc:review`
 
@@ -142,14 +144,43 @@ Accepts the same flags as `$cc:review`, plus free-text focus after flags.
 ```text
 $cc:rescue investigate why the tests started failing
 $cc:rescue fix the failing test with the smallest safe patch
-$cc:rescue --fresh --write implement the missing validation
+$cc:rescue --mode diagnose explain the citation numbering bug
+$cc:rescue --mode implement --fresh implement the missing validation
 $cc:rescue --resume continue the previous Claude Code run
-$cc:rescue --background investigate the regression
+$cc:rescue --autonomous --background run this without active supervision
 ```
 
-Foreground rescue is the default. This fork runs the companion command from the main Codex thread and keeps polling until Claude Code exits, so Codex can see live progress such as tool usage lines.
+Foreground supervision is the default. Codex classifies read-only questions such as "why" or "investigate" as `diagnose`; explicit change requests such as "fix" or "implement" use `implement`. Repository instructions constrain authorized work but never grant permission by themselves.
 
-Flags: `--background`, `--wait`, `--resume`, `--resume-last`, `--fresh`, `--write`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--prompt-file <path>`.
+Flags: `--mode <diagnose|implement|publish|autonomous>`, `--autonomous`, `--background`, `--resume`, `--resume-last`, `--fresh`, `--write` (legacy autonomous compatibility), `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--prompt-file <path>`, `--contract-file <path>`, `--todo-id <id>`, `--acceptance <text>`, `--allowed-paths <paths>`, `--verify <command>`.
+
+Supervised modes are foreground-only. Background mode requires explicit `--autonomous` because a detached Codex turn cannot perform semantic acceptance in real time.
+
+## Supervision Lifecycle
+
+```text
+User intent
+  -> Codex selects diagnose / implement / publish
+  -> Codex defines one todo and acceptance evidence
+  -> Claude executes while tool events stream to Codex
+  -> Codex steers or cancels on drift
+  -> Claude stops at awaiting_review
+  -> Codex inspects the real diff and reruns verification
+  -> Codex accepts or rejects the checkpoint
+  -> Codex alone commits accepted implementation work
+```
+
+Contracts follow [`schemas/supervision-contract.schema.json`](schemas/supervision-contract.schema.json). Multi-todo contracts must select one `activeTodoId`; this prevents Claude from silently skipping ahead or marking the whole plan complete.
+
+The companion also exposes internal supervisor controls used by `$cc:rescue`:
+
+```text
+node scripts/claude-companion.mjs steer <job-id> "correction"
+node scripts/claude-companion.mjs accept <job-id> "verification evidence"
+node scripts/claude-companion.mjs reject <job-id> "reason"
+```
+
+Users normally do not need to call these directly.
 
 ### `$cc:status`
 
@@ -180,11 +211,11 @@ $cc:log task-abc123 --all
 $cc:log task-abc123 --json
 ```
 
-Use this when you need execution details rather than just the final result.
+Use this for historical execution detail. Do not poll it repeatedly for supervised foreground work; Codex receives compact `[cc:event]` records automatically.
 
 ## Tool Logs
 
-The tracked job runtime captures Claude Code stream events and renders relevant tool inputs into the job log.
+The tracked job runtime captures Claude Code stream events, renders relevant tool inputs into the job log, and sends compact structured events to the supervising Codex turn.
 
 Captured examples include:
 
@@ -199,10 +230,10 @@ Sensitive-looking keys and inline assignments such as `token=...`, `password=...
 The JSON result also includes:
 
 - `toolUses`: tool name, sanitized input, command, file, and whether the tool mutates files
-- `changedFiles`: file paths from mutating tools
+- `changedFiles`: net file changes found by before/after Git snapshots
 - `touchedFiles`: all file paths detected in tool use
 
-This is meant to let Codex supervise Claude Code work with enough evidence to catch off-scope commands or unexpected file edits.
+Tool metadata is advisory. Acceptance uses before/after Git snapshots as the source of truth, including working-tree content, index state, and HEAD. This catches shell-driven changes that do not use Claude's `Edit` or `Write` tools.
 
 ## Review Gate
 
@@ -222,6 +253,8 @@ Run the lightweight public-source checks:
 ```bash
 npm run check
 ```
+
+The check suite includes supervision contract, workspace policy, shell-mutation classification, accept/reject, and steer-queue coverage.
 
 Run a local Codex install smoke test:
 

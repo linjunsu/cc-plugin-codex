@@ -95,6 +95,11 @@ function appendToBoundedLog(logFile, text) {
 function normalizeProgressEvent(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     return {
+      kind: typeof value.kind === "string" && value.kind.trim() ? value.kind.trim() : null,
+      tool: typeof value.tool === "string" && value.tool.trim() ? value.tool.trim() : null,
+      file: typeof value.file === "string" && value.file.trim() ? value.file.trim() : null,
+      command: typeof value.command === "string" && value.command.trim() ? value.command.trim() : null,
+      mutates: Boolean(value.mutates),
       message: String(value.message ?? "").trim(),
       phase: typeof value.phase === "string" && value.phase.trim() ? value.phase.trim() : null,
       threadId: typeof value.threadId === "string" && value.threadId.trim() ? value.threadId.trim() : null,
@@ -106,6 +111,11 @@ function normalizeProgressEvent(value) {
   }
 
   return {
+    kind: null,
+    tool: null,
+    file: null,
+    command: null,
+    mutates: false,
     message: String(value ?? "").trim(),
     phase: null,
     threadId: null,
@@ -201,7 +211,19 @@ export function createProgressReporter({ stderr = false, logFile = null, onEvent
     const event = normalizeProgressEvent(eventOrMessage);
     const stderrMessage = event.stderrMessage ?? event.message;
     if (stderr && stderrMessage) {
-      process.stderr.write(`[cc] ${stderrMessage}\n`);
+      const payload = {
+        kind: event.kind ?? "progress",
+        phase: event.phase,
+        tool: event.tool,
+        message: stderrMessage,
+        file: event.file,
+        command: event.command,
+        mutates: event.mutates,
+        ...(event.mutates && event.logBody
+          ? { detail: event.logBody.slice(0, 1200) }
+          : {}),
+      };
+      process.stderr.write(`[cc:event] ${JSON.stringify(payload)}\n`);
     }
     appendLogLine(logFile, event.message);
     appendLogBlock(logFile, event.logTitle, event.logBody);
@@ -244,15 +266,21 @@ export async function runTrackedJob(job, runner, options = {}) {
   try {
     const execution = await runner(onSpawn);
 
-    // Use CAS for terminal transition: running → completed/failed
-    const completionStatus = execution.exitStatus === 0 ? "completed" : "failed";
+    // Supervised tasks stop at an explicit Codex acceptance checkpoint. Other
+    // callers retain the normal completed/failed terminal states.
+    const completionStatus = execution.jobStatus ??
+      (execution.exitStatus === 0 ? "completed" : "failed");
     const completedAt = nowIso();
     const terminalData = {
       threadId: execution.threadId ?? null,
       turnId: execution.turnId ?? null,
       pid: null,
       pidIdentity: null,
-      phase: completionStatus === "completed" ? "done" : "failed",
+      phase: completionStatus === "completed"
+        ? "done"
+        : completionStatus === "awaiting_review"
+          ? "awaiting_review"
+          : completionStatus,
       completedAt,
       summary: execution.summary,
       result: execution.payload,

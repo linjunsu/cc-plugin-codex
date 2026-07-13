@@ -1,7 +1,7 @@
 {
   "name": "cc",
-  "version": "1.2.2",
-  "description": "Claude Code Plugin for Codex. Delegate reviews, investigations, tracked tasks, and inspect Claude tool logs from inside Codex.",
+  "version": "1.3.0",
+  "description": "Claude Code Plugin for Codex. Codex plans, supervises, steers, verifies, and accepts Claude Code work.",
   "author": {
     "name": "linjunsu",
     "email": "linjunsu11@gmail.com",
@@ -22,7 +22,7 @@
   "interface": {
     "displayName": "Claude Code",
     "shortDescription": "Claude Code Plugin for Codex",
-    "longDescription": "Use Claude Code from inside Codex to run read-only reviews, adversarial design reviews, and tracked rescue tasks through a Claude-backed runtime with job status, results, and captured tool logs.",
+    "longDescription": "Use Claude Code from inside Codex with authorization-aware diagnosis and implementation modes, todo checkpoints, live tool events, steering, workspace policy checks, independent Codex acceptance, tracked reviews, results, and logs.",
     "developerName": "linjunsu",
     "category": "Coding",
     "capabilities": [
@@ -34,7 +34,7 @@
     "termsOfServiceURL": "https://github.com/linjunsu/cc-plugin-codex",
     "defaultPrompt": [
       "Use Claude Code to review my current changes through $cc:review",
-      "Use Claude Code to investigate and fix this issue through $cc:rescue",
+      "Use Codex-supervised Claude Code to investigate or fix this issue through $cc:rescue",
       "Show the Claude Code tool log through $cc:log"
     ],
     "brandColor": "#7B39FE",

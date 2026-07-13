@@ -1,7 +1,7 @@
 {
   "name": "cc-plugin-codex",
-  "version": "1.2.2",
-  "description": "Claude Code Plugin for Codex with tracked Claude Code jobs and tool logs",
+  "version": "1.3.0",
+  "description": "Codex-supervised Claude Code tasks with checkpoints, steering, verification, and tracked logs",
   "type": "module",
   "author": {
     "name": "linjunsu",
@@ -43,13 +43,14 @@
   "scripts": {
     "check:changelog": "node scripts/check-changelog.mjs",
     "check:version-sync": "node scripts/check-version-sync.mjs",
-    "check:syntax": "node --check scripts/claude-companion.mjs && node --check scripts/lib/claude-cli.mjs && node --check scripts/install-personal.mjs && node --check scripts/uninstall-personal.mjs",
+    "check:syntax": "node --check scripts/claude-companion.mjs && node --check scripts/lib/claude-cli.mjs && node --check scripts/lib/supervision.mjs && node --check hooks/unread-result-hook.mjs && node --check scripts/install-personal.mjs && node --check scripts/uninstall-personal.mjs",
+    "test:supervision": "node scripts/supervision-test.mjs",
     "sync:plugin-version": "node scripts/sync-plugin-version.mjs",
-    "check": "npm run check:version-sync && npm run check:changelog && npm run check:syntax",
+    "check": "npm run check:version-sync && npm run check:changelog && npm run check:syntax && npm run test:supervision",
     "install:codex": "node scripts/install-personal.mjs",
     "prepack": "npm run check:version-sync && npm run check:changelog",
     "setup:git-hooks": "node scripts/setup-git-hooks.mjs",
-    "test": "npm run check:syntax",
+    "test": "npm run check:syntax && npm run test:supervision",
     "uninstall:codex": "node scripts/uninstall-personal.mjs",
     "update:codex": "node scripts/install-personal.mjs",
     "version": "npm run sync:plugin-version && npm run check:version-sync && npm run check:changelog"

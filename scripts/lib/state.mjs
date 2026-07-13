@@ -310,6 +310,11 @@ export function resolveJobLogFile(cwd, jobId) {
   return path.join(resolveJobsDir(cwd), `${jobId}.log`);
 }
 
+export function resolveJobSteerFile(cwd, jobId) {
+  sanitizeId(jobId, "job ID");
+  return path.join(resolveJobsDir(cwd), `${jobId}.steer.jsonl`);
+}
+
 export function generateJobId(prefix = "job") {
   const random = Math.random().toString(36).slice(2, 8);
   return `${prefix}-${Date.now().toString(36)}-${random}`;
@@ -689,6 +694,10 @@ export function cleanupOldJobs(cwd) {
     const defaultLogFile = resolveJobLogFile(cwd, job.id);
     try {
       fs.unlinkSync(defaultLogFile);
+    } catch {}
+    const steerFile = resolveJobSteerFile(cwd, job.id);
+    try {
+      fs.unlinkSync(steerFile);
     } catch {}
   }
 

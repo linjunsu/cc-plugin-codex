@@ -87,7 +87,16 @@ function formatElapsedDuration(startValue, endValue = null) {
 }
 
 const ACTIVE_STATUSES = new Set(["running", "cancelling"]);
-const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "cancel_failed", "unknown"]);
+const TERMINAL_STATUSES = new Set([
+  "completed",
+  "awaiting_review",
+  "rejected",
+  "policy_failed",
+  "failed",
+  "cancelled",
+  "cancel_failed",
+  "unknown",
+]);
 
 function inferJobPhase(job, progressPreview = []) {
   switch (job.status) {
@@ -95,6 +104,9 @@ function inferJobPhase(job, progressPreview = []) {
     case "cancel_failed": return "cancel_failed";
     case "cancelling": return "cancelling";
     case "failed": return "failed";
+    case "policy_failed": return "policy_failed";
+    case "awaiting_review": return "awaiting_review";
+    case "rejected": return "rejected";
     case "completed": return "done";
     case "unknown": return "unknown";
     default: break;

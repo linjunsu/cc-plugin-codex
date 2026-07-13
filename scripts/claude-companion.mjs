@@ -59,6 +59,18 @@ import {
   ensureGitRepository,
   resolveReviewTarget
 } from "./lib/git.mjs";
+import {
+  buildSupervisedPrompt,
+  buildTaskContract,
+  captureWorkspaceSnapshot,
+  evaluateToolPolicy,
+  evaluateWorkspaceChanges,
+  normalizeTaskMode,
+  readTaskContract,
+  renderSupervisionReport,
+  SUPERVISED_GIT_WRITE_TOOLS,
+  taskModeCapabilities,
+} from "./lib/supervision.mjs";
 import { binaryAvailable, getProcessIdentity } from "./lib/process.mjs";
 import { callCodexAppServer } from "./lib/codex-app-server.mjs";
 import {
@@ -77,6 +89,7 @@ import {
   JOB_RESERVATION_SUFFIX,
   resolveJobsDir,
   resolveJobLogFile,
+  resolveJobSteerFile,
   sanitizeId,
   setCurrentSession,
   setConfig,
@@ -131,10 +144,13 @@ function printUsage() {
       "  node scripts/claude-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>]",
       "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>] [focus text]",
-      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>] [prompt]",
+      "  node scripts/claude-companion.mjs task [--mode <diagnose|implement|publish|autonomous>] [--contract-file <path>] [--todo-id <id>] [--acceptance <text>] [--allowed-paths <paths>] [--verify <command>] [--resume-last|--resume|--fresh] [--model <model>] [--effort <level>] [prompt]",
       "  node scripts/claude-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/claude-companion.mjs log [job-id] [--tail <lines>] [--all] [--json]",
       "  node scripts/claude-companion.mjs result [job-id] [--json]",
+      "  node scripts/claude-companion.mjs steer [job-id] <instruction> [--json]",
+      "  node scripts/claude-companion.mjs accept [job-id] [note] [--json]",
+      "  node scripts/claude-companion.mjs reject [job-id] [reason] [--json]",
       "  node scripts/claude-companion.mjs cancel [job-id] [--json]",
       "  node scripts/claude-companion.mjs session-routing-context [--cwd <path>] [--json]",
       "  node scripts/claude-companion.mjs background-routing-context --kind <review|task> [--cwd <path>] [--json]",
@@ -890,24 +906,34 @@ async function executeTaskRun(request) {
     resumeLast: request.resumeLast
   });
 
+  const contract = request.contract ?? buildTaskContract({
+    mode: request.mode,
+    write: request.write,
+    prompt: request.prompt,
+  });
+  const beforeSnapshot = captureWorkspaceSnapshot(workspaceRoot);
+
   // Sandbox mode mirrors Codex conventions:
   //   --write  → workspace-write: all tools, OS sandbox limits writes to cwd+/tmp, no network
   //   default  → read-only:       read+web tools only, OS sandbox limits writes to /tmp, no network
   // Permission modes: dontAsk enforces allowedTools; bypassPermissions ignores them.
-  const sandboxMode = request.write ? "workspace-write" : "read-only";
+  const sandboxMode = contract.capabilities.write ? "workspace-write" : "read-only";
   const sandboxSettingsFile = createSandboxSettings(sandboxMode);
 
   const claudeOptions = {
     model: request.model ?? undefined,
     effort: request.effort ?? undefined,
-    permissionMode: request.write ? "bypassPermissions" : "dontAsk",
+    permissionMode: contract.capabilities.write ? "bypassPermissions" : "dontAsk",
     settingsFile: sandboxSettingsFile,
   };
 
   // workspace-write: all tools (no allowedTools = everything including MCP/Skill/Agent)
   // read-only: strict whitelist — read + web only, no MCP/Skill/Agent
-  if (!request.write) {
+  if (!contract.capabilities.write) {
     claudeOptions.allowedTools = SANDBOX_READ_ONLY_TOOLS;
+  }
+  if (["implement", "publish"].includes(contract.mode)) {
+    claudeOptions.disallowedTools = SUPERVISED_GIT_WRITE_TOOLS;
   }
 
   // Session resume support
@@ -919,13 +945,16 @@ async function executeTaskRun(request) {
     throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume-last.");
   }
 
-  const prompt = request.prompt || "Continue where you left off.";
+  const rawPrompt = request.prompt || "Continue where you left off.";
+  const prompt = buildSupervisedPrompt(rawPrompt, contract);
   let result;
   try {
     result = await runClaudeTurn(workspaceRoot, prompt, {
       ...claudeOptions,
       onProgress: request.onProgress,
       onSpawn: request.onSpawn,
+      enableSteering: contract.mode !== "autonomous",
+      steerFile: request.steerFile,
     });
   } finally {
     cleanupSandboxSettings(sandboxSettingsFile);
@@ -935,18 +964,60 @@ async function executeTaskRun(request) {
     typeof result.finalMessage === "string" ? result.finalMessage : "";
   const failureMessage = result.stderr ?? "";
   const toolUses = Array.isArray(result.toolUses) ? result.toolUses : [];
-  const changedFiles = uniqueNonEmptyStrings(
+  const toolReportedChangedFiles = uniqueNonEmptyStrings(
     toolUses.filter((toolUse) => toolUse?.mutates).map((toolUse) => toolUse.file)
   );
+  const afterSnapshot = captureWorkspaceSnapshot(workspaceRoot);
+  const workspace = evaluateWorkspaceChanges(beforeSnapshot, afterSnapshot, contract);
+  workspace.violations.push(...evaluateToolPolicy(toolUses, contract));
+  if (!workspace.gitRepository) {
+    workspace.changedFiles = toolReportedChangedFiles;
+    const mutatingUses = toolUses.filter((toolUse) => toolUse?.mutates);
+    if (contract.mode === "diagnose" && mutatingUses.length > 0) {
+      workspace.violations.push(
+        `Read-only diagnosis used ${mutatingUses.length} potentially mutating tool call(s) outside a Git repository.`
+      );
+    }
+    if (contract.allowedPaths.length > 0) {
+      workspace.outsideAllowedPaths = toolReportedChangedFiles.filter((file) => {
+        const normalized = String(file).replace(/\\/g, "/");
+        return !contract.allowedPaths.some((allowed) => {
+          const scope = String(allowed).replace(/\\/g, "/").replace(/\/$/, "");
+          return normalized === scope || normalized.endsWith(`/${scope}`) || normalized.startsWith(`${scope}/`);
+        });
+      });
+      if (workspace.outsideAllowedPaths.length > 0) {
+        workspace.violations.push(
+          `Changed files outside the allowed scope: ${workspace.outsideAllowedPaths.join(", ")}`
+        );
+      }
+    }
+  }
+  workspace.violations = uniqueNonEmptyStrings(workspace.violations);
+  const changedFiles = workspace.gitRepository
+    ? workspace.changedFiles
+    : toolReportedChangedFiles;
   const touchedFiles = uniqueNonEmptyStrings([
     ...(Array.isArray(result.touchedFiles) ? result.touchedFiles : []),
     ...changedFiles,
   ]);
+  const claudeExitStatus = resolveClaudeExitStatus(result);
+  const acceptanceState = claudeExitStatus !== 0
+    ? "execution_failed"
+    : contract.mode === "autonomous"
+      ? "not_required"
+      : workspace.violations.length > 0
+        ? "policy_failed"
+        : "pending";
+  const supervision = {
+    contract,
+    workspace,
+    acceptanceState,
+  };
   const rendered = renderTaskResult({
       rawOutput,
       failureMessage
-    }
-  );
+    }) + renderSupervisionReport(supervision);
   const payload = {
     status: result.status,
     warning: result.warning ?? null,
@@ -954,25 +1025,35 @@ async function executeTaskRun(request) {
     rawOutput,
     toolUses,
     changedFiles,
-    touchedFiles
+    touchedFiles,
+    supervision,
   };
 
+  const jobStatus = claudeExitStatus !== 0
+    ? undefined
+    : contract.mode === "autonomous"
+      ? "completed"
+      : workspace.violations.length > 0
+        ? "policy_failed"
+        : "awaiting_review";
+
   return {
-    exitStatus: resolveClaudeExitStatus(result),
+    exitStatus: workspace.violations.length > 0 ? 3 : claudeExitStatus,
+    jobStatus,
     threadId: result.sessionId,
     turnId: null,
     payload,
     rendered,
-    summary: firstMeaningfulLine(
-      rawOutput,
-      firstMeaningfulLine(
-        failureMessage,
-        `${taskMetadata.title} finished.`
-      )
-    ),
+    summary: contract.mode === "autonomous"
+      ? firstMeaningfulLine(rawOutput, `${taskMetadata.title} finished.`)
+      : workspace.violations.length > 0
+        ? `${contract.activeTodo.id} stopped on a supervision policy violation`
+        : `${contract.activeTodo.id} is awaiting Codex acceptance`,
     jobTitle: taskMetadata.title,
     jobClass: "task",
-    write: Boolean(request.write)
+    write: Boolean(contract.capabilities.write),
+    mode: contract.mode,
+    contract,
   };
 }
 
@@ -1009,6 +1090,8 @@ function createCompanionJob({
   jobClass,
   summary,
   write = false,
+  mode = null,
+  contract = null,
   sessionId = null,
   explicitJobId = null,
 }) {
@@ -1022,7 +1105,9 @@ function createCompanionJob({
       workspaceRoot,
       jobClass,
       summary,
-      write
+      write,
+      ...(mode ? { mode } : {}),
+      ...(contract ? { contract } : {}),
     },
     {
       cwd: workspaceRoot,
@@ -1145,6 +1230,8 @@ function buildTaskJob(
   workspaceRoot,
   taskMetadata,
   write,
+  mode,
+  contract,
   ownerSessionId = null,
   explicitJobId = null
 ) {
@@ -1156,6 +1243,8 @@ function buildTaskJob(
     jobClass: "task",
     summary: taskMetadata.summary,
     write,
+    mode,
+    contract,
     sessionId: ownerSessionId,
     explicitJobId
   });
@@ -1167,9 +1256,12 @@ function buildTaskRequest({
   effort,
   prompt,
   write,
+  mode,
+  contract,
   resumeLast,
   resumeSessionId,
   jobId,
+  steerFile,
   markViewedOnSuccess
 }) {
   return {
@@ -1178,9 +1270,12 @@ function buildTaskRequest({
     effort,
     prompt,
     write,
+    mode,
+    contract,
     resumeLast,
     resumeSessionId,
     jobId,
+    steerFile,
     markViewedOnSuccess
   };
 }
@@ -1239,6 +1334,9 @@ function statusPayloadSurfacesStoredResult(job) {
   return (
     Boolean(job) &&
     (job.status === "completed" ||
+      job.status === "awaiting_review" ||
+      job.status === "rejected" ||
+      job.status === "policy_failed" ||
       job.status === "failed" ||
       job.status === "cancelled" ||
       job.status === "cancel_failed" ||
@@ -1301,7 +1399,12 @@ function markViewedViaStatusAccess(workspaceRoot, jobs) {
   let changed = false;
 
   for (const job of jobs) {
-    if (!job?.id || job.resultViewedAt || !statusPayloadSurfacesStoredResult(job)) {
+    if (
+      !job?.id ||
+      job.resultViewedAt ||
+      job.status === "awaiting_review" ||
+      !statusPayloadSurfacesStoredResult(job)
+    ) {
       continue;
     }
     patchJob(workspaceRoot, job.id, { resultViewedAt: viewedAt });
@@ -1325,7 +1428,11 @@ async function runForegroundCommand(job, runner, options = {}) {
     (onSpawn) => runner(progress, onSpawn),
     { logFile }
   );
-  if (execution.exitStatus === 0 && options.markViewedOnSuccess) {
+  if (
+    execution.exitStatus === 0 &&
+    options.markViewedOnSuccess &&
+    execution.jobStatus !== "awaiting_review"
+  ) {
     patchJob(job.workspaceRoot, job.id, {
       resultViewedAt: nowIso(),
     });
@@ -1591,7 +1698,10 @@ async function handleAdversarialReview(argv) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file", "view-state", "owner-session-id", "job-id"],
+    valueOptions: [
+      "model", "effort", "cwd", "prompt-file", "view-state", "owner-session-id", "job-id",
+      "mode", "contract-file", "todo-id", "acceptance", "allowed-paths", "verify",
+    ],
     booleanOptions: [
       "json",
       "quiet-progress",
@@ -1599,7 +1709,8 @@ async function handleTask(argv) {
       "resume-last",
       "resume",
       "fresh",
-      "background"
+      "background",
+      "autonomous"
     ],
     aliasMap: {
       m: "model"
@@ -1614,13 +1725,29 @@ async function handleTask(argv) {
   const resolvedEffort = resolveDefaultEffort(model, options.effort);
   const effort = resolvedEffort ? resolveEffort(resolvedEffort) : null;
   const prompt = readTaskPrompt(cwd, options, positionals);
+  const resumeLast = Boolean(options["resume-last"] || options.resume);
+  const fresh = Boolean(options.fresh);
+  const requestedMode = options.autonomous ? "autonomous" : options.mode;
+  const mode = normalizeTaskMode(requestedMode, { write: Boolean(options.write) });
+  if (options.write && mode === "diagnose") {
+    throw new Error("--write conflicts with --mode diagnose.");
+  }
+  const contractSource = readTaskContract(cwd, options["contract-file"]);
+  const contract = buildTaskContract({
+    mode,
+    write: Boolean(options.write),
+    prompt: prompt || (resumeLast ? "Continue the previous Claude Code task." : ""),
+    contract: contractSource,
+    todoId: options["todo-id"],
+    acceptance: options.acceptance,
+    allowedPaths: options["allowed-paths"],
+    verification: options.verify,
+  });
   const markViewedOnSuccess = resolveMarkViewedOnSuccess(
     options["view-state"],
     Boolean(options.background)
   );
 
-  const resumeLast = Boolean(options["resume-last"] || options.resume);
-  const fresh = Boolean(options.fresh);
   if (resumeLast && fresh) {
     throw new Error("Choose either --resume/--resume-last or --fresh.");
   }
@@ -1631,7 +1758,14 @@ async function handleTask(argv) {
   }
   ensureClaudeReady(cwd);
 
-  const write = Boolean(options.write);
+  const write = mode === "autonomous"
+    ? Boolean(options.write)
+    : taskModeCapabilities(mode).write;
+  if (options.background && mode !== "autonomous") {
+    throw new Error(
+      "Supervised diagnose/implement/publish tasks must run in the foreground so Codex can monitor and intervene. Use --autonomous for detached execution."
+    );
+  }
   const ownerSessionId = resolveOwnerSessionId(options["owner-session-id"]);
   const explicitJobId = resolveExplicitJobId(options["job-id"], workspaceRoot);
   await withReleasedReservation(workspaceRoot, explicitJobId, async () => {
@@ -1660,9 +1794,12 @@ async function handleTask(argv) {
       workspaceRoot,
       taskMetadata,
       write,
+      mode,
+      contract,
       ownerSessionId,
       explicitJobId
     );
+    const steerFile = resolveJobSteerFile(workspaceRoot, job.id);
 
     if (options.background) {
       const request = buildTaskRequest({
@@ -1671,9 +1808,12 @@ async function handleTask(argv) {
         effort,
         prompt,
         write,
+        mode,
+        contract,
         resumeLast,
         resumeSessionId,
         jobId: job.id,
+        steerFile,
         markViewedOnSuccess
       });
       const { payload } = enqueueBackgroundTask(cwd, job, request);
@@ -1694,10 +1834,13 @@ async function handleTask(argv) {
           effort,
           prompt,
           write,
+          mode,
+          contract,
           resumeLast,
           resumeSessionId,
           onSpawn,
           jobId: job.id,
+          steerFile,
           onProgress: progress
         }),
       {
@@ -1867,7 +2010,7 @@ function handleResult(argv) {
   const reference = positionals[0] ?? "";
   const { workspaceRoot, job, state } = resolveResultJob(cwd, reference);
   let storedJob = readStoredJob(workspaceRoot, job.id);
-  if (state !== "active") {
+  if (state !== "active" && job.status !== "awaiting_review") {
     storedJob = patchJob(workspaceRoot, job.id, {
       resultViewedAt: nowIso(),
     }) ?? storedJob;
@@ -1915,6 +2058,106 @@ function handleLog(argv) {
   };
 
   outputCommandResult(payload, renderJobLogReport(payload), options.json);
+}
+
+function handleSteer(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"],
+  });
+  const cwd = resolveCommandCwd(options);
+  const reference = positionals.shift() ?? "";
+  const instruction = positionals.join(" ").trim();
+  if (!reference || !instruction) {
+    throw new Error("Usage: steer <job-id> <instruction>.");
+  }
+  const { workspaceRoot, job } = resolveCancelableJob(cwd, reference);
+  const steerFile = resolveJobSteerFile(workspaceRoot, job.id);
+  fs.mkdirSync(path.dirname(steerFile), { recursive: true, mode: 0o700 });
+  fs.appendFileSync(
+    steerFile,
+    `${JSON.stringify({ instruction, createdAt: nowIso() })}\n`,
+    { encoding: "utf8", mode: 0o600 }
+  );
+  const stored = readStoredJob(workspaceRoot, job.id) ?? job;
+  patchJob(workspaceRoot, job.id, {
+    steerCount: Number(stored.steerCount ?? 0) + 1,
+    lastSteeredAt: nowIso(),
+  });
+  appendLogLine(resolveJobLogFile(workspaceRoot, job.id), "Steering instruction queued by Codex.");
+  outputCommandResult(
+    { jobId: job.id, status: job.status, queued: true },
+    `Steering instruction queued for ${job.id}.\n`,
+    options.json
+  );
+}
+
+function updateAcceptanceState(cwd, reference, nextStatus, note, asJson) {
+  const snapshot = buildSingleJobSnapshot(cwd, reference);
+  const { workspaceRoot, job } = snapshot;
+  if (job.status !== "awaiting_review") {
+    throw new Error(
+      `Job ${job.id} is ${job.status}; only awaiting_review jobs can be accepted or rejected.`
+    );
+  }
+  const stored = readStoredJob(workspaceRoot, job.id) ?? job;
+  const timestamp = nowIso();
+  const acceptanceState = nextStatus === "completed" ? "accepted" : "rejected";
+  const result = stored.result && typeof stored.result === "object"
+    ? {
+        ...stored.result,
+        supervision: stored.result.supervision
+          ? { ...stored.result.supervision, acceptanceState }
+          : stored.result.supervision,
+      }
+    : stored.result;
+  const label = nextStatus === "completed" ? "accepted" : "rejected";
+  const rendered = `${String(stored.rendered ?? "").trimEnd()}\n\nCodex ${label} this checkpoint${note ? `: ${note}` : "."}\n`;
+  const transition = transitionJob(
+    workspaceRoot,
+    job.id,
+    ["awaiting_review"],
+    nextStatus,
+    {
+      phase: nextStatus === "completed" ? "done" : "rejected",
+      result,
+      rendered,
+      reviewNote: note || null,
+      ...(nextStatus === "completed" ? { acceptedAt: timestamp } : { rejectedAt: timestamp }),
+      ...(nextStatus === "completed" ? { resultViewedAt: timestamp } : {}),
+    }
+  );
+  if (!transition.transitioned) {
+    throw new Error(`Job ${job.id} changed state before the review decision was saved.`);
+  }
+  appendLogLine(resolveJobLogFile(workspaceRoot, job.id), `Codex ${label} the checkpoint.${note ? ` ${note}` : ""}`);
+  outputCommandResult(
+    { jobId: job.id, status: nextStatus, note: note || null },
+    `Codex ${label} ${job.id}${note ? `: ${note}` : "."}\n`,
+    asJson
+  );
+}
+
+function handleAccept(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"],
+  });
+  const cwd = resolveCommandCwd(options);
+  const reference = positionals.shift() ?? "";
+  if (!reference) throw new Error("Usage: accept <job-id> [verification note].");
+  updateAcceptanceState(cwd, reference, "completed", positionals.join(" ").trim(), options.json);
+}
+
+function handleReject(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"],
+  });
+  const cwd = resolveCommandCwd(options);
+  const reference = positionals.shift() ?? "";
+  if (!reference) throw new Error("Usage: reject <job-id> [reason].");
+  updateAcceptanceState(cwd, reference, "rejected", positionals.join(" ").trim(), options.json);
 }
 
 function handleTaskResumeCandidate(argv) {
@@ -2141,6 +2384,15 @@ async function main() {
       break;
     case "log":
       handleLog(argv);
+      break;
+    case "steer":
+      handleSteer(argv);
+      break;
+    case "accept":
+      handleAccept(argv);
+      break;
+    case "reject":
+      handleReject(argv);
       break;
     case "result":
       handleResult(argv);

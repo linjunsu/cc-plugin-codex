@@ -142,8 +142,18 @@ function toolCommand(input) {
   return firstNonEmpty(input.command, input.script, input.cmd);
 }
 
-function isMutatingTool(tool) {
-  return ["Edit", "MultiEdit", "NotebookEdit", "Write"].includes(tool);
+function shellCommandMayMutate(command) {
+  const text = String(command ?? "").trim();
+  if (!text) return false;
+  return /(?:^|[;&|]\s*|\b)(?:rm|rmdir|del|erase|move|mv|copy|cp|mkdir|md|touch|tee|sed\s+-i|perl\s+-i|git\s+(?:add|am|apply|checkout|cherry-pick|clean|commit|merge|mv|push|rebase|reset|restore|rm|stash|switch|tag)|npm\s+(?:install|uninstall|update|run\s+(?:build|format|lint:fix))|pnpm\s+(?:install|add|remove)|yarn\s+(?:install|add|remove)|python\s+[^\r\n]*|node\s+[^\r\n]*)\b/i.test(text) || /(?:^|[^>])>{1,2}\s*[^&]/.test(text);
+}
+
+function isMutatingTool(tool, input) {
+  if (["Edit", "MultiEdit", "NotebookEdit", "Write"].includes(tool)) return true;
+  if (["Bash", "PowerShell", "Shell"].includes(tool)) {
+    return shellCommandMayMutate(toolCommand(input));
+  }
+  return false;
 }
 
 function formatToolLogBody(tool, input) {
@@ -184,7 +194,7 @@ function summarizeToolUse(tool, input) {
   const safeInput = sanitizeInputObject(input);
   const filePath = toolFilePath(tool, safeInput);
   const command = toolCommand(safeInput);
-  const mutates = isMutatingTool(tool);
+  const mutates = isMutatingTool(tool, safeInput);
   const messageDetail = command
     ? command.split(/\r?\n/, 1)[0]
     : filePath
@@ -354,7 +364,8 @@ export class StreamParser {
       return {
         kind: "text",
         text: delta.text,
-        message: delta.text,
+        message: "",
+        stderrMessage: "",
         phase: "running",
         threadId: this.state.sessionId,
       };
@@ -367,7 +378,8 @@ export class StreamParser {
         return {
           kind: "text",
           text: blockDelta.text,
-          message: blockDelta.text,
+          message: "",
+          stderrMessage: "",
           phase: "running",
           threadId: this.state.sessionId,
         };
@@ -375,7 +387,8 @@ export class StreamParser {
       if (blockDelta?.type === "thinking_delta" && blockDelta.thinking) {
         return {
           kind: "thinking",
-          message: blockDelta.thinking,
+          message: "",
+          stderrMessage: "",
           phase: "thinking",
           threadId: this.state.sessionId,
         };
@@ -405,7 +418,8 @@ export class StreamParser {
         return {
           kind: "tool_start",
           tool: cb.name,
-          message: `Using tool: ${cb.name}`,
+          message: "",
+          stderrMessage: "",
           phase: "tool",
           threadId: this.state.sessionId,
         };
@@ -441,6 +455,9 @@ export class StreamParser {
           kind: "tool_use",
           tool: block.tool,
           input: toolUse.input,
+          file: toolUse.file,
+          command: toolUse.command,
+          mutates: toolUse.mutates,
           message: toolUse.message,
           logTitle: toolUse.logTitle,
           logBody: toolUse.logBody,
@@ -605,8 +622,8 @@ export const SANDBOX_REVIEW_TOOLS = [
  *
  * read-only:       no file writes outside the OS temp dir. Network is allowed so
  *                  that `WebFetch`, `WebSearch`, and the Claude CLI's API path keep
- *                  working; the review allowlist excludes Bash entirely, so there
- *                  is no shell surface to exfiltrate or mutate state through.
+ *                  working; the tool allowlist exposes only explicit read-only Git
+ *                  commands and the OS sandbox blocks writes outside temp.
  * workspace-write: Bash can write to cwd + OS temp dir only, no network from Bash.
  *                  All tools allowed (no allowedTools restriction).
  */
@@ -856,6 +873,10 @@ export function buildArgs(prompt, options = {}) {
     args.push("--output-format", options.outputFormat ?? "json");
   }
 
+  if (options.inputFormat === "stream-json") {
+    args.push("--input-format", "stream-json");
+  }
+
   if (options.noSessionPersistence) {
     args.push("--no-session-persistence");
   }
@@ -874,6 +895,11 @@ export function buildArgs(prompt, options = {}) {
   if (options.allowedTools) {
     for (const tool of options.allowedTools) {
       args.push("--allowedTools", tool);
+    }
+  }
+  if (options.disallowedTools) {
+    for (const tool of options.disallowedTools) {
+      args.push("--disallowedTools", tool);
     }
   }
   if (options.maxTurns) {
@@ -898,8 +924,45 @@ export function buildArgs(prompt, options = {}) {
     args.push("--strict-mcp-config");
   }
 
-  args.push("--", prompt);
+  if (options.inputFormat !== "stream-json") {
+    args.push("--", prompt);
+  }
   return args;
+}
+
+/** @visibleForTesting */
+export function formatStreamUserMessage(text) {
+  return JSON.stringify({
+    type: "user",
+    message: {
+      role: "user",
+      content: [{ type: "text", text: String(text ?? "") }],
+    },
+  });
+}
+
+function readSteerInstructions(filePath, offset) {
+  if (!filePath || !fs.existsSync(filePath)) return { offset, instructions: [] };
+  const content = fs.readFileSync(filePath);
+  if (content.length <= offset) return { offset, instructions: [] };
+  const chunk = content.subarray(offset);
+  const finalNewline = chunk.lastIndexOf(0x0a);
+  if (finalNewline < 0) return { offset, instructions: [] };
+  const completeBytes = chunk.subarray(0, finalNewline + 1);
+  const completeText = completeBytes.toString("utf8");
+  const instructions = [];
+  for (const line of completeText.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line);
+      const instruction = String(parsed.instruction ?? "").trim();
+      if (instruction) instructions.push(instruction);
+    } catch {
+      // Internal writers emit one complete JSON object per line. Ignore a
+      // malformed complete record so it cannot block later steering messages.
+    }
+  }
+  return { offset: offset + completeBytes.length, instructions };
 }
 
 /**
@@ -907,8 +970,10 @@ export function buildArgs(prompt, options = {}) {
  * Returns { status, sessionId, finalMessage, toolUses, touchedFiles, stderr, pid, pidIdentity }
  */
 export async function runClaudeTurn(cwd, prompt, options = {}) {
+  const streamingInput = Boolean(options.enableSteering || options.steerFile);
   const args = buildArgs(prompt, {
     outputFormat: "stream-json",
+    ...(streamingInput ? { inputFormat: "stream-json" } : {}),
     ...options,
   });
 
@@ -916,7 +981,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
     const proc = spawn(CLAUDE_BIN, args, {
       cwd,
       detached: true, // new process group for safe cancellation
-      stdio: ["ignore", "pipe", "pipe"], // stdin ignored — prompt is passed as CLI arg
+      stdio: [streamingInput ? "pipe" : "ignore", "pipe", "pipe"],
     });
 
     let pidIdentity = null;
@@ -933,6 +998,42 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
 
     const parser = new StreamParser();
     let stderr = "";
+    let steerOffset = 0;
+    let steerTimer = null;
+    let stdinEnded = false;
+
+    const writeUserMessage = (text, kind = "steer") => {
+      if (!streamingInput || stdinEnded || proc.stdin.destroyed) return false;
+      proc.stdin.write(`${formatStreamUserMessage(text)}\n`);
+      if (kind === "steer" && options.onProgress) {
+        options.onProgress({
+          kind: "steer",
+          message: "Steering instruction delivered to Claude Code",
+          phase: "steering",
+          logTitle: "Steering instruction",
+          logBody: String(text),
+        });
+      }
+      return true;
+    };
+
+    const drainSteerFile = () => {
+      const next = readSteerInstructions(options.steerFile, steerOffset);
+      steerOffset = next.offset;
+      for (const instruction of next.instructions) {
+        writeUserMessage(instruction);
+      }
+      return next.instructions.length;
+    };
+
+    if (streamingInput) {
+      proc.stdin.on("error", () => {});
+      writeUserMessage(prompt, "initial");
+      if (options.steerFile) {
+        steerTimer = setInterval(drainSteerFile, 250);
+        steerTimer.unref?.();
+      }
+    }
 
     proc.stderr.setEncoding("utf8");
     proc.stderr.on("data", (chunk) => {
@@ -947,9 +1048,15 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
           options.onProgress(evt);
         }
       }
+      if (streamingInput && parser.state.receivedTerminalEvent && !stdinEnded) {
+        drainSteerFile();
+        stdinEnded = true;
+        proc.stdin.end();
+      }
     });
 
     proc.on("close", (code) => {
+      if (steerTimer) clearInterval(steerTimer);
 
 
       // Flush remaining buffer
@@ -975,6 +1082,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
     });
 
     proc.on("error", (err) => {
+      if (steerTimer) clearInterval(steerTimer);
 
       resolve({
         status: "failed",

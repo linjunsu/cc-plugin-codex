@@ -17,16 +17,26 @@ import { nowIso, SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "../scripts/lib/workspace.mjs";
 
 const MAX_LISTED_JOBS = 3;
+const NOTIFIABLE_JOB_STATUSES = new Set([
+  "completed",
+  "awaiting_review",
+  "rejected",
+  "policy_failed",
+  "failed",
+  "cancelled",
+  "cancel_failed",
+  "unknown",
+]);
 const SKIP_INTERACTIVE_HOOKS_ENV = "CLAUDE_COMPANION_SKIP_INTERACTIVE_HOOKS";
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function isExplicitClaudeStatusRequest(prompt) {
   const text = String(prompt ?? "").toLowerCase();
-  return text.includes("$cc:status") || text.includes("$cc:result");
+  return text.includes("$cc:status") || text.includes("$cc:result") || text.includes("$cc:log");
 }
 
 function summarizeJob(job) {
-  const parts = [job.id];
+  const parts = [job.id, job.status];
   if (job.kindLabel) parts.push(job.kindLabel);
   if (job.summary) parts.push(job.summary);
   return parts.join(" | ");
@@ -35,15 +45,20 @@ function summarizeJob(job) {
 function buildAdditionalContext(jobs) {
   const listed = jobs.slice(0, MAX_LISTED_JOBS).map((job) => `- ${summarizeJob(job)}`);
   const remaining = jobs.length - listed.length;
-  const intro =
-    jobs.length === 1
-      ? "A Claude Code background job from this session has finished and has not been surfaced yet."
-      : `${jobs.length} Claude Code background jobs from this session have finished and have not been surfaced yet.`;
-
-  const guidance =
-    jobs.length === 1
-      ? `Before handling the new request, briefly mention that ${jobs[0].id} finished and ask whether the user wants to inspect its result first or continue with the new request. If they want the result, direct them to \`$cc:result ${jobs[0].id}\`. If the user is clearly asking about this finished work already, answer that directly instead of asking again. Do not bring this completion up again automatically after this turn.`
-      : "Before handling the new request, briefly mention that these Claude Code jobs finished and ask whether the user wants to inspect them first or continue with the new request. If they want to inspect them, direct them to `$cc:status` first, then `$cc:result <job-id>` for a specific finished job. If the user is clearly asking about this finished work already, answer that directly instead of asking again. Do not bring these completions up again automatically after this turn.";
+  const intro = jobs.length === 1
+    ? "A Claude Code job from this session reached a terminal checkpoint and has not been surfaced yet."
+    : `${jobs.length} Claude Code jobs from this session reached terminal checkpoints and have not been surfaced yet.`;
+  const awaitingReview = jobs.filter((job) => job.status === "awaiting_review");
+  const failed = jobs.filter((job) => ["failed", "policy_failed", "cancel_failed", "unknown"].includes(job.status));
+  const guidance = [
+    awaitingReview.length > 0
+      ? "Before continuing, Codex must inspect each awaiting-review result, the real workspace diff, and required verification. Accept or reject the todo; do not treat Claude's report as proof."
+      : null,
+    failed.length > 0
+      ? "Surface the failed job status and error before continuing. Do not silently ignore or describe it as completed."
+      : null,
+    "Use `$cc:result <job-id>` for the stored result and `$cc:log <job-id>` only when more execution detail is needed. Do not repeat this notification automatically after this turn.",
+  ].filter(Boolean).join(" ");
 
   return [
     intro,
@@ -56,14 +71,14 @@ function buildAdditionalContext(jobs) {
   ].join("\n");
 }
 
-function selectUnreadCompletedJobs(workspaceRoot, sessionId) {
+function selectUnreadTerminalJobs(workspaceRoot, sessionId) {
   if (!sessionId) {
     return [];
   }
 
   return listJobs(workspaceRoot)
     .filter((job) => job.sessionId === sessionId)
-    .filter((job) => job.status === "completed")
+    .filter((job) => NOTIFIABLE_JOB_STATUSES.has(job.status))
     .filter((job) => !job.resultViewedAt)
     .filter((job) => !job.notifiedAt)
     .sort((left, right) =>
@@ -125,7 +140,7 @@ async function main() {
     return;
   }
 
-  const jobs = selectUnreadCompletedJobs(workspaceRoot, sessionId);
+  const jobs = selectUnreadTerminalJobs(workspaceRoot, sessionId);
   if (jobs.length === 0) {
     return;
   }

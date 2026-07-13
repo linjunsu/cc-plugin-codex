@@ -187,6 +187,12 @@ node scripts/claude-companion.mjs reject <job-id> "reason"
 
 Users normally do not need to call these directly.
 
+### Patient Supervision
+
+Codex supervises correctness and boundaries, not Claude's pace. Long thinking, reading many relevant files, temporary silence, and a lack of visible file changes are not drift and must not trigger steering by themselves.
+
+Codex intervenes only when observable events show scope drift, unauthorized or unsafe actions, a repeated error loop, a material misunderstanding, or an attempted completion that omits acceptance evidence. A steering event means the correction was sent to Claude's input stream; it is not an acknowledgement from Claude. Status updates should therefore describe timestamped observations instead of claiming that Claude is idle or refusing to work.
+
 ### `$cc:status`
 
 ```text

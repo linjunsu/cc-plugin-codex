@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.3.1
+
+- Make `$cc:rescue` supervision evidence-driven: elapsed time, long thinking, relevant reads, temporary silence, and no visible file changes no longer justify steering or cancellation by themselves.
+- Require Codex to cite a concrete event and violated contract condition before intervening, and prevent repeated impatience-driven steering without new evidence.
+- Clarify that a queued or delivered steering instruction is only sent input, not proof that Claude understood or acted on it.
+- Require timestamped, observation-scoped status language and prohibit unsupported claims that Claude is idle, stuck, or refusing to work.
+
 ## v1.3.0
 
 - Turn `$cc:rescue` into an authorization-aware Codex supervision workflow with `diagnose`, `implement`, `publish`, and explicit `autonomous` modes.

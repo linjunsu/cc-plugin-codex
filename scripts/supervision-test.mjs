@@ -22,6 +22,12 @@ import {
   writeJobFile,
 } from "./lib/state.mjs";
 
+const rescueSkill = fs.readFileSync(path.resolve("skills", "rescue", "SKILL.md"), "utf8");
+assert.match(rescueSkill, /Silence is not drift\./);
+assert.match(rescueSkill, /Never steer, cancel, or pressure Claude merely because/i);
+assert.match(rescueSkill, /does not prove that Claude understood, acknowledged, or acted/i);
+assert.match(rescueSkill, /Do not send repeated steering instructions merely because Claude has not responded quickly/i);
+
 function git(cwd, ...args) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr || `git ${args.join(" ")} failed`);

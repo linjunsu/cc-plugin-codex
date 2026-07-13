@@ -96,13 +96,31 @@ Supervised work is foreground-only. Run the companion directly with `exec_comman
 
 The foreground stream emits compact `[cc:event]` JSON lines containing tool, command, file, mutation likelihood, and mutating-tool detail. Evaluate these events against the active todo while Claude runs.
 
-Intervene when an event shows scope drift, an unauthorized Git action, a skipped acceptance condition, or a material misunderstanding:
+Silence is not drift. Never steer, cancel, or pressure Claude merely because execution is taking a long time, thinking is lengthy, many relevant files are being read, no new event has arrived, or no file change is visible yet. Analysis time and work pace are Claude's responsibility; Codex supervises scope, authorization, safety, and acceptance quality.
+
+When no new event is available, report only the timestamped observation, for example: "As of 14:32:10, the last observed event was a Read; Claude is still running and no newer observable event is available." Do not claim that Claude is idle, stuck, refusing to work, or has made no changes beyond that observation window.
+
+Intervene only when concrete event evidence shows at least one of these conditions:
+
+- work outside the active todo or allowed paths;
+- an unauthorized Git, destructive, external-write, or otherwise unsafe action;
+- a repeated command/error loop with no meaningful adaptation;
+- a material misunderstanding that contradicts the task contract;
+- an attempted completion that skips an acceptance criterion or required verification.
+
+Before intervening, identify the specific event and the violated contract condition. Do not send repeated steering instructions merely because Claude has not responded quickly; wait for a subsequent event or explicit evidence that the first correction was ignored.
+
+If the supervising Codex turn is approaching an execution limit, request a bounded checkpoint or stop the job cleanly. Do not convert the deadline into an instruction to hurry, stop analysis, or begin editing prematurely.
+
+Intervene with a specific correction when the evidence threshold is met:
 
 ```bash
 node "<plugin-root>/scripts/claude-companion.mjs" steer <job-id> "<specific correction>"
 ```
 
 Use `steer` for correctable drift. Use `cancel <job-id>` for destructive, unauthorized, or unsafe behavior that should not continue. Codex should call these commands itself; do not make the user manually monitor `$cc:log`.
+
+A `steer` queue/delivery event proves only that the instruction was written to Claude's input stream. It does not prove that Claude understood, acknowledged, or acted on the correction. Describe it as "sent" until a later Claude event provides evidence of a response.
 
 `$cc:log` remains a diagnostic fallback for historical detail. It is not the primary supervision mechanism.
 

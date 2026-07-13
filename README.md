@@ -9,6 +9,11 @@
 </p>
 
 <p align="center">
+  <a href="README.md"><kbd>English</kbd></a>
+  <a href="README.zh-CN.md"><kbd>简体中文</kbd></a>
+</p>
+
+<p align="center">
   <a href="#quick-start"><strong>Quick Start</strong></a> ·
   <a href="#commands"><strong>Commands</strong></a> ·
   <a href="#tool-logs"><strong>Tool Logs</strong></a> ·

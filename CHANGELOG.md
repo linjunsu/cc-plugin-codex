@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.3.2
+
+- Fix native Windows process identity capture by using the process creation time and executable name from CIM instead of reading Linux `/proc` files.
+- Cancel Claude Code process trees on Windows with identity-verified `taskkill /T /F`, while preserving the existing POSIX process-group behavior.
+- Add regression coverage for Windows identity lookup, process-tree termination, PID reuse protection, and cancellation dispatch.
+
 ## v1.3.1
 
 - Make `$cc:rescue` supervision evidence-driven: elapsed time, long thinking, relevant reads, temporary silence, and no visible file changes no longer justify steering or cancellation by themselves.

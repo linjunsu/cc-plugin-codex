@@ -6,7 +6,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { buildArgs, formatStreamUserMessage, StreamParser } from "./lib/claude-cli.mjs";
+import {
+  buildArgs,
+  cancelClaudeProcess,
+  formatStreamUserMessage,
+  StreamParser,
+} from "./lib/claude-cli.mjs";
+import { getProcessIdentity, terminateProcessTree } from "./lib/process.mjs";
 import {
   buildSupervisedPrompt,
   buildTaskContract,
@@ -38,6 +44,58 @@ assert.equal(normalizeTaskMode(null, { write: false }), "diagnose");
 assert.equal(normalizeTaskMode(null, { write: true }), "implement");
 assert.equal(normalizeTaskMode("publish"), "publish");
 assert.throws(() => normalizeTaskMode("unsafe"), /Unsupported task mode/);
+
+let windowsIdentityCommand;
+const windowsIdentity = getProcessIdentity(1234, {
+  platform: "win32",
+  runCommandCheckedImpl(command, args) {
+    windowsIdentityCommand = { command, args };
+    return { stdout: "638880000000000000|claude.exe\n" };
+  },
+});
+assert.equal(windowsIdentity, "638880000000000000|claude.exe");
+assert.equal(windowsIdentityCommand.command, "powershell.exe");
+assert.match(windowsIdentityCommand.args.join(" "), /ProcessId = 1234/);
+assert.throws(() => getProcessIdentity(0), /Invalid process ID/);
+
+let taskkillInvocation;
+const treeTermination = terminateProcessTree(1234, {
+  platform: "win32",
+  runCommandImpl(command, args) {
+    taskkillInvocation = { command, args };
+    return { status: 0, stdout: "SUCCESS", stderr: "", error: null };
+  },
+});
+assert.equal(treeTermination.delivered, true);
+assert.deepEqual(taskkillInvocation, {
+  command: "taskkill",
+  args: ["/PID", "1234", "/T", "/F"],
+});
+
+let cancelledPid;
+const windowsCancellation = await cancelClaudeProcess(1234, "expected-identity", {
+  platform: "win32",
+  validateProcessIdentityImpl: () => true,
+  terminateProcessTreeImpl(pid, options) {
+    cancelledPid = { pid, options };
+    return { attempted: true, delivered: true, method: "taskkill" };
+  },
+  waitForProcessExitImpl: async () => true,
+});
+assert.deepEqual(windowsCancellation, { cancelled: true });
+assert.deepEqual(cancelledPid, { pid: 1234, options: { platform: "win32" } });
+
+let recycledPidTerminated = false;
+const recycledCancellation = await cancelClaudeProcess(1234, "old-identity", {
+  platform: "win32",
+  validateProcessIdentityImpl: () => false,
+  terminateProcessTreeImpl() {
+    recycledPidTerminated = true;
+  },
+});
+assert.equal(recycledCancellation.cancelled, true);
+assert.match(recycledCancellation.note, /PID recycled/);
+assert.equal(recycledPidTerminated, false);
 
 const diagnoseContract = buildTaskContract({
   mode: "diagnose",

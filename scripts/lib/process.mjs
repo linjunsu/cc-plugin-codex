@@ -143,21 +143,51 @@ export function formatCommandFailure(result) {
  * Get stable process identity for PID reuse detection.
  * Returns a string that is immutable for the process lifetime.
  */
-export function getProcessIdentity(pid) {
-  if (process.platform === 'darwin') {
-    const row = runCommandChecked('ps', ['-o', 'lstart=,comm=', '-p', String(pid)]);
-    return row.stdout.trim();
-  } else {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const closeParen = stat.lastIndexOf(')');
-    const fields = stat.slice(closeParen + 2).split(' ');
-    return fields[19]; // starttime field
+export function getProcessIdentity(pid, options = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    throw new Error(`Invalid process ID: ${pid}`);
   }
+
+  const platform = options.platform ?? process.platform;
+  const runCommandCheckedImpl = options.runCommandCheckedImpl ?? runCommandChecked;
+  const readFileSyncImpl = options.readFileSyncImpl ?? readFileSync;
+
+  if (platform === "win32") {
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      `$p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'`,
+      "if ($null -eq $p) { exit 3 }",
+      "$created = $p.CreationDate.ToUniversalTime().Ticks",
+      "[Console]::Out.Write(\"$created|$($p.Name)\")",
+    ].join("; ");
+    const row = runCommandCheckedImpl("powershell.exe", [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      script,
+    ]);
+    const identity = row.stdout.trim();
+    if (!identity) {
+      throw new Error(`Process ${pid} returned an empty identity`);
+    }
+    return identity;
+  }
+
+  if (platform === "darwin") {
+    const row = runCommandCheckedImpl("ps", ["-o", "lstart=,comm=", "-p", String(pid)]);
+    return row.stdout.trim();
+  }
+
+  const stat = readFileSyncImpl(`/proc/${pid}/stat`, "utf8");
+  const closeParen = stat.lastIndexOf(")");
+  const fields = stat.slice(closeParen + 2).split(" ");
+  return fields[19]; // starttime field
 }
 
-export function validateProcessIdentity(pid, expectedIdentity) {
+export function validateProcessIdentity(pid, expectedIdentity, options = {}) {
   try {
-    return getProcessIdentity(pid) === expectedIdentity;
+    return getProcessIdentity(pid, options) === expectedIdentity;
   } catch {
     return false;
   }

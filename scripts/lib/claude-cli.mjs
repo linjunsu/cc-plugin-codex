@@ -14,7 +14,12 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizePathSlashes, resolvePluginRuntimeRoot } from "./codex-paths.mjs";
-import { getProcessIdentity, validateProcessIdentity } from "./process.mjs";
+import {
+  getProcessIdentity,
+  isProcessAlive,
+  terminateProcessTree,
+  validateProcessIdentity,
+} from "./process.mjs";
 
 const CLAUDE_BIN = "claude";
 export const MAX_STREAM_PARSER_UNKNOWN_EVENTS = 50;
@@ -1150,19 +1155,53 @@ export async function runClaudeAdversarialReview(
 }
 
 // ---------------------------------------------------------------------------
-// Cancellation — process-group based, identity-verified
+// Cancellation — process-tree based, identity-verified
 // ---------------------------------------------------------------------------
 
 /**
  * Cancel a running Claude Code process.
- * Uses process group kill with PID identity verification.
+ * Uses platform-specific process-tree termination with PID identity verification.
  */
-export async function cancelClaudeProcess(pid, pidIdentity) {
+export async function cancelClaudeProcess(pid, pidIdentity, options = {}) {
+  const platform = options.platform ?? process.platform;
+  const validateProcessIdentityImpl =
+    options.validateProcessIdentityImpl ?? validateProcessIdentity;
+
   // Verify PID identity to prevent killing recycled PIDs
-  if (pidIdentity && !validateProcessIdentity(pid, pidIdentity)) {
+  if (pidIdentity && !validateProcessIdentityImpl(pid, pidIdentity)) {
     return {
       cancelled: true,
       note: "Process already exited (PID recycled)",
+    };
+  }
+
+  if (platform === "win32") {
+    const terminateProcessTreeImpl =
+      options.terminateProcessTreeImpl ?? terminateProcessTree;
+    const waitForProcessExitImpl =
+      options.waitForProcessExitImpl ?? waitForProcessExit;
+    let termination;
+    try {
+      termination = terminateProcessTreeImpl(pid, { platform });
+    } catch (error) {
+      return {
+        cancelled: false,
+        note: error instanceof Error ? error.message : String(error),
+      };
+    }
+
+    if (!termination.delivered) {
+      return { cancelled: true, note: "Process not found" };
+    }
+
+    const dead = await waitForProcessExitImpl(pid, 5000);
+    if (dead) {
+      return { cancelled: true };
+    }
+
+    return {
+      cancelled: false,
+      note: `Process tree ${pid} still alive after taskkill`,
     };
   }
 
@@ -1180,7 +1219,7 @@ export async function cancelClaudeProcess(pid, pidIdentity) {
   }
 
   // Escalate to SIGKILL
-  if (pidIdentity && !validateProcessIdentity(pid, pidIdentity)) {
+  if (pidIdentity && !validateProcessIdentityImpl(pid, pidIdentity)) {
     return {
       cancelled: true,
       note: "Process exited during SIGTERM wait",
@@ -1200,6 +1239,15 @@ export async function cancelClaudeProcess(pid, pidIdentity) {
     cancelled: false,
     note: `Process group ${pid} still alive after SIGKILL`,
   };
+}
+
+async function waitForProcessExit(pid, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (!isProcessAlive(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return !isProcessAlive(pid);
 }
 
 function isProcessGroupAlive(pgid) {

@@ -41,6 +41,7 @@ const RESERVED_JOB_FILE_MAX_AGE_MS = 60 * 60 * 1000;
 export const JOB_RESERVATION_SUFFIX = ".reserve";
 export const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "cancelling"]);
 const NO_SESSION_RETENTION_BUCKET = "__no-session__";
+let currentProcessIdentity;
 
 export function nowIso() {
   return new Date().toISOString();
@@ -517,15 +518,18 @@ function recoverStaleLock(lockFile) {
 }
 
 function writeLockOwnership(lockFile) {
-  let myIdentity = null;
-  try {
-    myIdentity = getProcessIdentity(process.pid);
-  } catch {}
+  if (currentProcessIdentity === undefined) {
+    try {
+      currentProcessIdentity = getProcessIdentity(process.pid);
+    } catch {
+      currentProcessIdentity = null;
+    }
+  }
   fs.writeFileSync(
     lockFile,
     JSON.stringify({
       pid: process.pid,
-      identity: myIdentity,
+      identity: currentProcessIdentity,
       timestamp: Date.now(),
     }),
     { mode: 0o600 }

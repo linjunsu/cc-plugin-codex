@@ -152,12 +152,13 @@ $cc:rescue 用最小改动修复失败测试
 $cc:rescue --mode diagnose 解释引用编号错误
 $cc:rescue --mode implement --fresh 实现缺失的校验
 $cc:rescue --resume 继续上一次 Claude Code 任务
+$cc:rescue --resume-job task-abc123 精确续接指定的驳回检查点
 $cc:rescue --autonomous --background 在没有主动监督的情况下运行
 ```
 
 默认使用前台监督。Codex 会把“为什么”“调查一下”等只读问题归为 `diagnose`，把“修复”“实现”等明确改动请求归为 `implement`。仓库中的规则文件只约束已获授权的操作方式，不会自行授予修改或发布权限。
 
-参数：`--mode <diagnose|implement|publish|autonomous>`、`--autonomous`、`--background`、`--resume`、`--resume-last`、`--fresh`、`--write`（兼容旧版 autonomous 模式）、`--model <model>`、`--effort <low|medium|high|xhigh|max>`、`--prompt-file <path>`、`--contract-file <path>`、`--todo-id <id>`、`--acceptance <text>`、`--allowed-paths <paths>`、`--verify <command>`。
+参数：`--mode <diagnose|implement|publish|autonomous>`、`--autonomous`、`--background`、`--resume`、`--resume-last`、`--resume-job <job-id>`、`--fresh`、`--write`（兼容旧版 autonomous 模式）、`--model <model>`、`--effort <low|medium|high|xhigh|max>`、`--prompt-file <path>`、`--contract-file <path>`、`--todo-id <id>`、`--acceptance <text>`、`--allowed-paths <paths>`、`--verify <command>`。
 
 受监督模式只能在前台运行。后台任务必须显式使用 `--autonomous`，因为脱离当前 Codex 回合后无法进行实时语义监督和逐项验收。
 
@@ -192,6 +193,8 @@ node scripts/claude-companion.mjs reject <job-id> "拒绝原因"
 Codex监督的是正确性和执行边界，而不是 Claude的工作速度。长时间思考、读取多个相关文件、暂时没有新事件或尚未出现文件修改，都不代表任务跑偏，不能单独作为纠偏依据。
 
 只有可观察事件明确显示范围漂移、未授权或不安全操作、重复错误循环、需求理解错误，或者准备结束却缺少验收证据时，Codex才能介入。纠偏事件只代表指令已经写入 Claude的输入流，不代表 Claude已经理解、确认或执行。状态更新应说明带时间戳的已观察事实，不能据此声称 Claude正在空转或拒绝工作。
+
+如果必跑验证证明还必须修改另一个文件，Claude会在修改前停止并返回 `scope_change_requested`。Codex核实证据后可以扩展合同，再用 `--resume-job` 精确续接同一任务。被驳回后的修正同样走这条任务链，并保留最初的工作区 baseline。
 
 ### `$cc:status`
 

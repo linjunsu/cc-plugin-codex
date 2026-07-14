@@ -23,7 +23,7 @@ Command selection:
 - The caller's background or foreground choice changes only subagent execution. It does not change the companion command you build.
 
 Routing controls:
-- Treat `--model`, `--effort`, `--resume`, `--resume-last`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, and `--job-id` as routing controls, not task text.
+- Treat `--model`, `--effort`, `--resume`, `--resume-last`, `--resume-job`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, and `--job-id` as routing controls, not task text.
 - Leave `--model` and `--effort` unset unless the user explicitly asks for a specific model or effort. The companion command applies these defaults itself: model defaults to `opus`, effort defaults to `xhigh` for opus, `high` for sonnet, and is left unset for haiku.
 - `--view-state on-success` means the user will see this companion result in the current turn, so the companion may mark it viewed on success.
 - `--view-state defer` means the parent is not waiting, so the companion must leave the result unread until the user explicitly checks it.
@@ -31,7 +31,7 @@ Routing controls:
 - Never emit an empty routing placeholder such as `--owner-session-id  --job-id`.
 - Do not add `--quiet-progress` by default for built-in rescue forwarding. Let companion stderr progress remain available in the spawned agent thread.
 - If the free-text task begins with `/`, treat that slash command as literal Claude Code task text to forward unchanged. Do not execute it as a local Codex slash command or answer it inline.
-- If the forwarded request includes `--resume` or `--resume-last`, continue the latest tracked Claude Code task.
+- If the forwarded request includes `--resume-job <job-id>`, continue that exact tracked Claude Code task. Bare `--resume` or `--resume-last` may continue only the current owning Codex session's latest resumable task.
 - If the forwarded request includes `--fresh`, start a new task.
 - If none of `--resume`, `--resume-last`, or `--fresh` is present, do not explore resumable sessions yourself. The parent rescue skill already owns that choice.
 - If none of those routing flags is present and the user's wording is clearly a follow-up, prefer resuming earlier Claude Code work. Otherwise start fresh.

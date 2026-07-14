@@ -20,6 +20,7 @@ const MAX_LISTED_JOBS = 3;
 const NOTIFIABLE_JOB_STATUSES = new Set([
   "completed",
   "awaiting_review",
+  "scope_change_requested",
   "rejected",
   "policy_failed",
   "failed",
@@ -49,10 +50,14 @@ function buildAdditionalContext(jobs) {
     ? "A Claude Code job from this session reached a terminal checkpoint and has not been surfaced yet."
     : `${jobs.length} Claude Code jobs from this session reached terminal checkpoints and have not been surfaced yet.`;
   const awaitingReview = jobs.filter((job) => job.status === "awaiting_review");
+  const scopeRequests = jobs.filter((job) => job.status === "scope_change_requested");
   const failed = jobs.filter((job) => ["failed", "policy_failed", "cancel_failed", "unknown"].includes(job.status));
   const guidance = [
     awaitingReview.length > 0
       ? "Before continuing, Codex must inspect each awaiting-review result, the real workspace diff, and required verification. Accept or reject the todo; do not treat Claude's report as proof."
+      : null,
+    scopeRequests.length > 0
+      ? "A task requested additional allowed paths. Inspect the evidence, revise the contract only if justified, then continue it with --resume-job <job-id>."
       : null,
     failed.length > 0
       ? "Surface the failed job status and error before continuing. Do not silently ignore or describe it as completed."
@@ -82,8 +87,8 @@ function selectUnreadTerminalJobs(workspaceRoot, sessionId) {
     .filter((job) => !job.resultViewedAt)
     .filter((job) => !job.notifiedAt)
     .sort((left, right) =>
-      String(right.updatedAt ?? right.completedAt ?? "").localeCompare(
-        String(left.updatedAt ?? left.completedAt ?? "")
+      String(right.completedAt ?? right.createdAt ?? "").localeCompare(
+        String(left.completedAt ?? left.createdAt ?? "")
       )
     );
 }

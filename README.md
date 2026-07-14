@@ -152,12 +152,13 @@ $cc:rescue fix the failing test with the smallest safe patch
 $cc:rescue --mode diagnose explain the citation numbering bug
 $cc:rescue --mode implement --fresh implement the missing validation
 $cc:rescue --resume continue the previous Claude Code run
+$cc:rescue --resume-job task-abc123 continue an exact rejected checkpoint
 $cc:rescue --autonomous --background run this without active supervision
 ```
 
 Foreground supervision is the default. Codex classifies read-only questions such as "why" or "investigate" as `diagnose`; explicit change requests such as "fix" or "implement" use `implement`. Repository instructions constrain authorized work but never grant permission by themselves.
 
-Flags: `--mode <diagnose|implement|publish|autonomous>`, `--autonomous`, `--background`, `--resume`, `--resume-last`, `--fresh`, `--write` (legacy autonomous compatibility), `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--prompt-file <path>`, `--contract-file <path>`, `--todo-id <id>`, `--acceptance <text>`, `--allowed-paths <paths>`, `--verify <command>`.
+Flags: `--mode <diagnose|implement|publish|autonomous>`, `--autonomous`, `--background`, `--resume`, `--resume-last`, `--resume-job <job-id>`, `--fresh`, `--write` (legacy autonomous compatibility), `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--prompt-file <path>`, `--contract-file <path>`, `--todo-id <id>`, `--acceptance <text>`, `--allowed-paths <paths>`, `--verify <command>`.
 
 Supervised modes are foreground-only. Background mode requires explicit `--autonomous` because a detached Codex turn cannot perform semantic acceptance in real time.
 
@@ -192,6 +193,8 @@ Users normally do not need to call these directly.
 Codex supervises correctness and boundaries, not Claude's pace. Long thinking, reading many relevant files, temporary silence, and a lack of visible file changes are not drift and must not trigger steering by themselves.
 
 Codex intervenes only when observable events show scope drift, unauthorized or unsafe actions, a repeated error loop, a material misunderstanding, or an attempted completion that omits acceptance evidence. A steering event means the correction was sent to Claude's input stream; it is not an acknowledgement from Claude. Status updates should therefore describe timestamped observations instead of claiming that Claude is idle or refusing to work.
+
+If a required verification reveals that another file must change, Claude stops before editing it and returns `scope_change_requested`. Codex can inspect the evidence, expand the contract when justified, and continue the exact task with `--resume-job`. Rejected corrections also use this exact task-chain resume path, preserving the original workspace baseline.
 
 ### `$cc:status`
 

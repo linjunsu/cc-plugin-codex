@@ -1,6 +1,6 @@
 ---
 name: rescue
-description: 'Run a Claude Code diagnosis or implementation under active Codex supervision. Codex owns intent classification, todo boundaries, live monitoring, steering, independent verification, acceptance, and any final Git commit. Args include --mode, --background, --resume, --fresh, --model, --effort, and task text.'
+description: 'Run a Claude Code diagnosis or implementation under active Codex supervision. Codex owns intent classification, todo boundaries, live monitoring, steering, independent verification, acceptance, and any final Git commit. Args include --mode, --background, --resume, --resume-job, --fresh, --model, --effort, and task text.'
 ---
 
 # Claude Code Rescue Under Codex Supervision
@@ -88,11 +88,11 @@ Use non-empty `ownerSessionId` and `jobId` values as `--owner-session-id` and `-
 
 If the task text is multi-line, long, contains quotes/backticks, or contains XML-style blocks, stage it in a temporary prompt file outside the repository and preserve it exactly.
 
-`--resume` and `--resume-last` continue the latest Claude session. `--fresh` starts a new one. If none is supplied, use `task-resume-candidate --json`; ask whether to resume only when the candidate is genuinely the same user task. Do not resume unrelated work merely because a candidate exists.
+Use `--resume-job <job-id>` for every rejected checkpoint, scope correction, or other continuation of a known task. It resumes that exact Claude session and preserves the task-chain workspace baseline. Bare `--resume`/`--resume-last` may be used only when `task-resume-candidate --json` proves the newest candidate belongs to the current Codex session and is genuinely the same user task. `--fresh` starts a new session. Never resume unrelated work merely because the repository has an older completed task.
 
 ## 4. Monitor and Intervene
 
-Supervised work is foreground-only. Run the companion directly with `exec_command`; if it yields a session ID, poll that same session with `write_stdin` until exit. Do not implement polling with `Start-Sleep` plus repeated `$cc:status` or `$cc:log` calls.
+Supervised work is foreground-only. Run the companion directly with `exec_command`; if it yields a session ID, poll that same session with `write_stdin` until exit. If the shell session cannot be retained, use one blocking `status <job-id> --wait --json` call as the fallback. Do not implement polling with `Start-Sleep` plus repeated `$cc:status`, `$cc:result`, or `$cc:log` calls.
 
 The foreground stream emits compact `[cc:event]` JSON lines containing tool, command, file, mutation likelihood, and mutating-tool detail. Evaluate these events against the active todo while Claude runs.
 
@@ -107,6 +107,8 @@ Intervene only when concrete event evidence shows at least one of these conditio
 - a repeated command/error loop with no meaningful adaptation;
 - a material misunderstanding that contradicts the task contract;
 - an attempted completion that skips an acceptance criterion or required verification.
+
+When Claude returns `scope_change_requested`, inspect its `scopeChangeRequest` evidence. If the additional path is required by the todo or a required verification, revise the contract and continue with `--resume-job <job-id>`. If it is not justified, keep the original scope and give a bounded correction. A request made before editing is not a scope violation.
 
 Before intervening, identify the specific event and the violated contract condition. Do not send repeated steering instructions merely because Claude has not responded quickly; wait for a subsequent event or explicit evidence that the first correction was ignored.
 
@@ -151,7 +153,7 @@ node "<plugin-root>/scripts/claude-companion.mjs" accept <job-id> "diff inspecte
 node "<plugin-root>/scripts/claude-companion.mjs" reject <job-id> "missing browser build verification"
 ```
 
-Then resume the same Claude session with a bounded correction for the same todo. Do not mark the Codex plan item complete until `accept` succeeds.
+Then resume the same Claude session with a bounded correction for the same todo using `--resume-job <rejected-job-id>`. Do not mark the Codex plan item complete until `accept` succeeds.
 
 For `diagnose`, verify that the workspace is unchanged and evaluate the evidence behind the root-cause claim before accepting.
 

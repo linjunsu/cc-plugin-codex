@@ -25,10 +25,49 @@ import { resolveWorkspaceRoot } from "./workspace.mjs";
 export const DEFAULT_MAX_STATUS_JOBS = 15;
 export const DEFAULT_MAX_PROGRESS_LINES = 4;
 
+function jobChronologyTime(job) {
+  const value = job.completedAt ?? job.createdAt ?? job.startedAt ?? job.updatedAt ?? "";
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 export function sortJobsNewestFirst(jobs) {
-  return [...jobs].sort((left, right) =>
-    String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""))
+  return [...jobs].sort((left, right) => {
+    const timeDifference = jobChronologyTime(right) - jobChronologyTime(left);
+    if (timeDifference !== 0) return timeDifference;
+    return String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? ""));
+  });
+}
+
+export function resolveTaskResumeCandidate(jobs, options = {}) {
+  const ownerSessionId = String(options.ownerSessionId ?? "").trim();
+  const reference = String(options.reference ?? "").trim();
+  const candidates = sortJobsNewestFirst(jobs).filter((job) =>
+    job.jobClass === "task" &&
+    typeof (job.threadId ?? job.result?.sessionId) === "string" &&
+    String(job.threadId ?? job.result?.sessionId).trim() &&
+    !["queued", "running", "cancelling"].includes(job.status)
   );
+
+  if (!reference) {
+    return candidates.find((job) => !ownerSessionId || job.sessionId === ownerSessionId) ?? null;
+  }
+  const exact = candidates.find((job) => job.id === reference);
+  if (exact) return exact;
+  const prefixMatches = candidates.filter((job) => job.id.startsWith(reference));
+  if (prefixMatches.length === 1) return prefixMatches[0];
+  if (prefixMatches.length > 1) {
+    throw new Error(`Task reference "${reference}" is ambiguous. Use a longer job id.`);
+  }
+  throw new Error(`No resumable task found for "${reference}".`);
+}
+
+export function buildTaskChainContext(jobId, resumeCandidate, currentBaseline) {
+  return {
+    parentJobId: resumeCandidate?.id ?? null,
+    chainRootId: resumeCandidate?.chainRootId ?? resumeCandidate?.id ?? jobId,
+    chainBaseline: resumeCandidate?.chainBaseline ?? currentBaseline,
+  };
 }
 
 function getCurrentSessionId(options = {}) {
@@ -90,6 +129,7 @@ const ACTIVE_STATUSES = new Set(["running", "cancelling"]);
 const TERMINAL_STATUSES = new Set([
   "completed",
   "awaiting_review",
+  "scope_change_requested",
   "rejected",
   "policy_failed",
   "failed",
@@ -106,6 +146,7 @@ function inferJobPhase(job, progressPreview = []) {
     case "failed": return "failed";
     case "policy_failed": return "policy_failed";
     case "awaiting_review": return "awaiting_review";
+    case "scope_change_requested": return "scope_change_requested";
     case "rejected": return "rejected";
     case "completed": return "done";
     case "unknown": return "unknown";

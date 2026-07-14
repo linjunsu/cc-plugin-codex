@@ -280,6 +280,8 @@ export async function runTrackedJob(job, runner, options = {}) {
         ? "done"
         : completionStatus === "awaiting_review"
           ? "awaiting_review"
+          : completionStatus === "scope_change_requested"
+            ? "scope_change_requested"
           : completionStatus,
       completedAt,
       summary: execution.summary,

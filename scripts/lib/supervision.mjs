@@ -232,7 +232,8 @@ export function buildSupervisedPrompt(prompt, contract) {
     "",
     "Execution rules:",
     "- Execute only the active todo. Do not silently broaden or rewrite the plan.",
-    "- If information is missing or the task conflicts with the contract, stop and report the blocker.",
+    "- If a required change falls outside Allowed paths, do not edit that path. Stop and emit exactly one line in this form: CC_SCOPE_CHANGE_REQUEST: {\"paths\":[\"relative/path\"],\"reason\":\"why it is required\"}",
+    "- If information is otherwise missing or the task conflicts with the contract, stop and report the blocker.",
     "- End with changed files, commands/tests run, results, remaining risks, and any unmet criterion.",
     ...modeRules,
     "[END CC SUPERVISION CONTRACT]",
@@ -241,6 +242,24 @@ export function buildSupervisedPrompt(prompt, contract) {
     String(prompt ?? contract.activeTodo.task),
     "[END USER TASK]",
   ].join("\n");
+}
+
+export function parseScopeChangeRequest(rawOutput) {
+  const line = String(rawOutput ?? "")
+    .split(/\r?\n/)
+    .find((entry) => entry.trim().startsWith("CC_SCOPE_CHANGE_REQUEST:"));
+  if (!line) return null;
+
+  const payloadText = line.slice(line.indexOf(":") + 1).trim();
+  try {
+    const payload = JSON.parse(payloadText);
+    const paths = uniqueStrings(Array.isArray(payload?.paths) ? payload.paths : []);
+    const reason = String(payload?.reason ?? "").trim();
+    if (paths.length === 0 || !reason) return null;
+    return { paths, reason };
+  } catch {
+    return null;
+  }
 }
 
 function git(cwd, args) {
@@ -393,6 +412,14 @@ export function renderSupervisionReport(supervision) {
   if (supervision.workspace.violations.length > 0) {
     lines.push("", "Policy violations:", ...supervision.workspace.violations.map((item) => `- ${item}`));
   }
+  if (supervision.scopeChangeRequest) {
+    lines.push(
+      "",
+      "Requested scope expansion:",
+      ...supervision.scopeChangeRequest.paths.map((item) => `- ${item}`),
+      `Reason: ${supervision.scopeChangeRequest.reason}`
+    );
+  }
   if (supervision.contract.verification.length > 0) {
     lines.push("", "Codex must independently run:", ...supervision.contract.verification.map((item) => `- ${item}`));
   }
@@ -400,6 +427,11 @@ export function renderSupervisionReport(supervision) {
     lines.push(
       "",
       "Claude has stopped at the checkpoint. Codex must inspect the real diff and verification evidence, then accept or reject this todo."
+    );
+  } else if (supervision.acceptanceState === "scope_change_requested") {
+    lines.push(
+      "",
+      "Claude stopped before editing the requested paths. Codex must inspect the evidence and either revise the contract or keep the original scope."
     );
   }
   return `${lines.join("\n").trimEnd()}\n`;

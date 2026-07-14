@@ -66,6 +66,7 @@ import {
   evaluateToolPolicy,
   evaluateWorkspaceChanges,
   normalizeTaskMode,
+  parseScopeChangeRequest,
   readTaskContract,
   renderSupervisionReport,
   SUPERVISED_GIT_WRITE_TOOLS,
@@ -98,11 +99,13 @@ import {
   cleanupOldJobs,
 } from "./lib/state.mjs";
 import {
+  buildTaskChainContext,
   buildSingleJobSnapshot,
   buildStatusSnapshot,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
+  resolveTaskResumeCandidate,
   sortJobsNewestFirst
 } from "./lib/job-control.mjs";
 import {
@@ -144,7 +147,7 @@ function printUsage() {
       "  node scripts/claude-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>]",
       "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>] [focus text]",
-      "  node scripts/claude-companion.mjs task [--mode <diagnose|implement|publish|autonomous>] [--contract-file <path>] [--todo-id <id>] [--acceptance <text>] [--allowed-paths <paths>] [--verify <command>] [--resume-last|--resume|--fresh] [--model <model>] [--effort <level>] [prompt]",
+      "  node scripts/claude-companion.mjs task [--mode <diagnose|implement|publish|autonomous>] [--contract-file <path>] [--todo-id <id>] [--acceptance <text>] [--allowed-paths <paths>] [--verify <command>] [--resume|--resume-job <job-id>|--fresh] [--model <model>] [--effort <level>] [prompt]",
       "  node scripts/claude-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/claude-companion.mjs log [job-id] [--tail <lines>] [--all] [--json]",
       "  node scripts/claude-companion.mjs result [job-id] [--json]",
@@ -911,7 +914,7 @@ async function executeTaskRun(request) {
     write: request.write,
     prompt: request.prompt,
   });
-  const beforeSnapshot = captureWorkspaceSnapshot(workspaceRoot);
+  const beforeSnapshot = request.chainBaseline ?? captureWorkspaceSnapshot(workspaceRoot);
 
   // Sandbox mode mirrors Codex conventions:
   //   --write  → workspace-write: all tools, OS sandbox limits writes to cwd+/tmp, no network
@@ -1002,17 +1005,23 @@ async function executeTaskRun(request) {
     ...changedFiles,
   ]);
   const claudeExitStatus = resolveClaudeExitStatus(result);
+  const scopeChangeRequest = workspace.violations.length === 0
+    ? parseScopeChangeRequest(rawOutput)
+    : null;
   const acceptanceState = claudeExitStatus !== 0
     ? "execution_failed"
     : contract.mode === "autonomous"
       ? "not_required"
       : workspace.violations.length > 0
         ? "policy_failed"
-        : "pending";
+        : scopeChangeRequest
+          ? "scope_change_requested"
+          : "pending";
   const supervision = {
     contract,
     workspace,
     acceptanceState,
+    scopeChangeRequest,
   };
   const rendered = renderTaskResult({
       rawOutput,
@@ -1027,6 +1036,7 @@ async function executeTaskRun(request) {
     changedFiles,
     touchedFiles,
     supervision,
+    scopeChangeRequest,
   };
 
   const jobStatus = claudeExitStatus !== 0
@@ -1035,7 +1045,9 @@ async function executeTaskRun(request) {
       ? "completed"
       : workspace.violations.length > 0
         ? "policy_failed"
-        : "awaiting_review";
+        : scopeChangeRequest
+          ? "scope_change_requested"
+          : "awaiting_review";
 
   return {
     exitStatus: workspace.violations.length > 0 ? 3 : claudeExitStatus,
@@ -1048,6 +1060,8 @@ async function executeTaskRun(request) {
       ? firstMeaningfulLine(rawOutput, `${taskMetadata.title} finished.`)
       : workspace.violations.length > 0
         ? `${contract.activeTodo.id} stopped on a supervision policy violation`
+        : scopeChangeRequest
+          ? `${contract.activeTodo.id} requested an allowed-path expansion`
         : `${contract.activeTodo.id} is awaiting Codex acceptance`,
     jobTitle: taskMetadata.title,
     jobClass: "task",
@@ -1260,6 +1274,9 @@ function buildTaskRequest({
   contract,
   resumeLast,
   resumeSessionId,
+  chainBaseline,
+  chainRootId,
+  parentJobId,
   jobId,
   steerFile,
   markViewedOnSuccess
@@ -1274,6 +1291,9 @@ function buildTaskRequest({
     contract,
     resumeLast,
     resumeSessionId,
+    chainBaseline,
+    chainRootId,
+    parentJobId,
     jobId,
     steerFile,
     markViewedOnSuccess
@@ -1335,6 +1355,7 @@ function statusPayloadSurfacesStoredResult(job) {
     Boolean(job) &&
     (job.status === "completed" ||
       job.status === "awaiting_review" ||
+      job.status === "scope_change_requested" ||
       job.status === "rejected" ||
       job.status === "policy_failed" ||
       job.status === "failed" ||
@@ -1403,6 +1424,7 @@ function markViewedViaStatusAccess(workspaceRoot, jobs) {
       !job?.id ||
       job.resultViewedAt ||
       job.status === "awaiting_review" ||
+      job.status === "scope_change_requested" ||
       !statusPayloadSurfacesStoredResult(job)
     ) {
       continue;
@@ -1431,7 +1453,7 @@ async function runForegroundCommand(job, runner, options = {}) {
   if (
     execution.exitStatus === 0 &&
     options.markViewedOnSuccess &&
-    execution.jobStatus !== "awaiting_review"
+    !["awaiting_review", "scope_change_requested"].includes(execution.jobStatus)
   ) {
     patchJob(job.workspaceRoot, job.id, {
       resultViewedAt: nowIso(),
@@ -1557,15 +1579,19 @@ async function waitForStoredJob(workspaceRoot, jobId, options = {}) {
 // Resume support
 // ---------------------------------------------------------------------------
 
-async function resolveLatestResumableSession(cwd, options = {}) {
+function resolveTaskResumeTarget(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter(
-    (job) => job.id !== options.excludeJobId
-  );
+  const ownerSessionId = String(options.ownerSessionId ?? "").trim();
+  const reference = String(options.reference ?? "").trim();
+  if (!reference && !ownerSessionId) {
+    throw new Error("Implicit --resume requires an owning Codex session. Use --resume-job <job-id> instead.");
+  }
+  const jobs = listJobs(workspaceRoot).filter((job) => job.id !== options.excludeJobId);
 
-  // Check for active tasks first
-  const activeTask = jobs.find(
-    (job) => job.jobClass === "task" && isActiveJobStatus(job.status)
+  const activeTask = sortJobsNewestFirst(jobs).find(
+    (job) =>
+      job.jobClass === "task" &&
+      isActiveJobStatus(job.status)
   );
   if (activeTask) {
     throw new Error(
@@ -1573,18 +1599,12 @@ async function resolveLatestResumableSession(cwd, options = {}) {
     );
   }
 
-  // Find most recent completed task with a session ID
-  const trackedTask = jobs.find(
-    (job) =>
-      job.jobClass === "task" &&
-      job.status === "completed" &&
-      (job.threadId || job.sessionId)
-  );
-  if (trackedTask) {
-    return trackedTask.threadId || trackedTask.sessionId;
-  }
-
-  return null;
+  const candidate = resolveTaskResumeCandidate(jobs, { ownerSessionId, reference });
+  if (!candidate) return null;
+  return {
+    job: candidate,
+    sessionId: candidate.threadId ?? candidate.result?.sessionId,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1701,6 +1721,7 @@ async function handleTask(argv) {
     valueOptions: [
       "model", "effort", "cwd", "prompt-file", "view-state", "owner-session-id", "job-id",
       "mode", "contract-file", "todo-id", "acceptance", "allowed-paths", "verify",
+      "resume-job",
     ],
     booleanOptions: [
       "json",
@@ -1725,7 +1746,8 @@ async function handleTask(argv) {
   const resolvedEffort = resolveDefaultEffort(model, options.effort);
   const effort = resolvedEffort ? resolveEffort(resolvedEffort) : null;
   const prompt = readTaskPrompt(cwd, options, positionals);
-  const resumeLast = Boolean(options["resume-last"] || options.resume);
+  const resumeReference = String(options["resume-job"] ?? "").trim();
+  const resumeLast = Boolean(options["resume-last"] || options.resume || resumeReference);
   const fresh = Boolean(options.fresh);
   const requestedMode = options.autonomous ? "autonomous" : options.mode;
   const mode = normalizeTaskMode(requestedMode, { write: Boolean(options.write) });
@@ -1766,7 +1788,9 @@ async function handleTask(argv) {
       "Supervised diagnose/implement/publish tasks must run in the foreground so Codex can monitor and intervene. Use --autonomous for detached execution."
     );
   }
-  const ownerSessionId = resolveOwnerSessionId(options["owner-session-id"]);
+  const ownerSessionId =
+    resolveOwnerSessionId(options["owner-session-id"]) ??
+    buildSessionRoutingContext(cwd).ownerSessionId;
   const explicitJobId = resolveExplicitJobId(options["job-id"], workspaceRoot);
   await withReleasedReservation(workspaceRoot, explicitJobId, async () => {
     const taskMetadata = buildTaskRunMetadata({
@@ -1776,14 +1800,19 @@ async function handleTask(argv) {
     alignCurrentSessionToOwner(workspaceRoot, ownerSessionId);
 
     // Resolve resume session inside the reservation guard so failures do not leak markers.
+    let resumeTarget = null;
     let resumeSessionId = null;
     if (resumeLast) {
-      resumeSessionId = await resolveLatestResumableSession(workspaceRoot);
-      if (!resumeSessionId) {
+      resumeTarget = resolveTaskResumeTarget(workspaceRoot, {
+        ownerSessionId,
+        reference: resumeReference,
+      });
+      if (!resumeTarget) {
         throw new Error(
-          "No previous Claude Code task session was found for this repository."
+          "No previous Claude Code task session was found for the current Codex session."
         );
       }
+      resumeSessionId = resumeTarget.sessionId;
     }
 
     if (options.background) {
@@ -1799,6 +1828,13 @@ async function handleTask(argv) {
       ownerSessionId,
       explicitJobId
     );
+    const chain = buildTaskChainContext(
+      job.id,
+      resumeTarget?.job ?? null,
+      captureWorkspaceSnapshot(workspaceRoot)
+    );
+    Object.assign(job, chain);
+    const { chainBaseline } = chain;
     const steerFile = resolveJobSteerFile(workspaceRoot, job.id);
 
     if (options.background) {
@@ -1812,6 +1848,9 @@ async function handleTask(argv) {
         contract,
         resumeLast,
         resumeSessionId,
+        chainBaseline,
+        chainRootId: job.chainRootId,
+        parentJobId: job.parentJobId,
         jobId: job.id,
         steerFile,
         markViewedOnSuccess
@@ -1838,6 +1877,9 @@ async function handleTask(argv) {
           contract,
           resumeLast,
           resumeSessionId,
+          chainBaseline,
+          chainRootId: job.chainRootId,
+          parentJobId: job.parentJobId,
           onSpawn,
           jobId: job.id,
           steerFile,
@@ -2161,8 +2203,8 @@ function handleReject(argv) {
 }
 
 function handleTaskResumeCandidate(argv) {
-  const { options } = parseCommandInput(argv, {
-    valueOptions: ["cwd"],
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "job-id"],
     booleanOptions: ["json"]
   });
 
@@ -2170,18 +2212,13 @@ function handleTaskResumeCandidate(argv) {
   const routing = buildSessionRoutingContext(cwd);
   const workspaceRoot = routing.workspaceRoot;
   const sessionId = routing.ownerSessionId;
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
-  const candidate =
-    sessionId == null
-      ? null
-      : jobs.find(
-          (job) =>
-            job.jobClass === "task" &&
-            (job.threadId || job.sessionId) &&
-            job.status !== "queued" &&
-            job.status !== "running" &&
-            job.sessionId === sessionId
-        ) ?? null;
+  const reference = options["job-id"] ?? positionals[0] ?? "";
+  const candidate = sessionId == null && !reference
+    ? null
+    : resolveTaskResumeCandidate(listJobs(workspaceRoot), {
+        ownerSessionId: sessionId,
+        reference,
+      });
 
   const payload = {
     available: Boolean(candidate),
@@ -2196,6 +2233,8 @@ function handleTaskResumeCandidate(argv) {
             summary: candidate.summary ?? null,
             threadId: candidate.threadId ?? null,
             sessionId: candidate.sessionId ?? null,
+            claudeSessionId: candidate.threadId ?? candidate.result?.sessionId ?? null,
+            chainRootId: candidate.chainRootId ?? candidate.id,
             completedAt: candidate.completedAt ?? null,
             updatedAt: candidate.updatedAt ?? null
           }
@@ -2356,6 +2395,10 @@ async function handleCancel(argv) {
 async function main() {
   const [subcommand, ...argv] = process.argv.slice(2);
   if (!subcommand || subcommand === "help" || subcommand === "--help") {
+    printUsage();
+    return;
+  }
+  if (argv.length === 1 && ["--help", "-h", "help"].includes(argv[0])) {
     printUsage();
     return;
   }

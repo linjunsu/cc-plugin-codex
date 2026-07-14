@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.3.3
+
+- Add exact `--resume-job <job-id>` continuation, restrict implicit resume to the owning Codex session, and preserve the original workspace baseline across rejected or corrected task runs.
+- Stop `task --help` and other subcommand help requests from launching Claude Code work.
+- Keep task chronology stable when results are viewed, so old jobs cannot become `latestFinished` merely because their metadata was read.
+- Add structured `scope_change_requested` checkpoints so Claude can request an allowed-path expansion before editing outside the contract.
+- Tighten rescue guidance around exact correction resumes and event-driven waiting instead of repeated result polling.
+
 ## v1.3.2
 
 - Fix native Windows process identity capture by using the process creation time and executable name from CIM instead of reading Linux `/proc` files.

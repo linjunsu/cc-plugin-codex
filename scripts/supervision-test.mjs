@@ -20,9 +20,16 @@ import {
   evaluateToolPolicy,
   evaluateWorkspaceChanges,
   normalizeTaskMode,
+  parseScopeChangeRequest,
   SUPERVISED_GIT_WRITE_TOOLS,
 } from "./lib/supervision.mjs";
 import {
+  buildTaskChainContext,
+  resolveTaskResumeCandidate,
+  sortJobsNewestFirst,
+} from "./lib/job-control.mjs";
+import {
+  listJobs,
   readJobFile,
   resolveJobSteerFile,
   writeJobFile,
@@ -115,6 +122,88 @@ const implementContract = buildTaskContract({
 assert.equal(implementContract.capabilities.write, true);
 assert.equal(implementContract.capabilities.mayCommit, false);
 assert.match(buildSupervisedPrompt("Fix the parser", implementContract), /Do not stage files/i);
+assert.match(buildSupervisedPrompt("Fix the parser", implementContract), /CC_SCOPE_CHANGE_REQUEST/);
+assert.deepEqual(
+  parseScopeChangeRequest(
+    'Need one more regression file.\nCC_SCOPE_CHANGE_REQUEST: {"paths":["scripts/smoke-test.mjs"],"reason":"npm test proves the old assertion must change"}'
+  ),
+  {
+    paths: ["scripts/smoke-test.mjs"],
+    reason: "npm test proves the old assertion must change",
+  }
+);
+assert.equal(parseScopeChangeRequest("No scope request"), null);
+
+const resumeJobs = [
+  {
+    id: "task-old",
+    jobClass: "task",
+    status: "completed",
+    sessionId: "owner-a",
+    threadId: "claude-old",
+    createdAt: "2026-07-13T10:00:00.000Z",
+    completedAt: "2026-07-13T10:10:00.000Z",
+    updatedAt: "2026-07-14T12:00:00.000Z",
+  },
+  {
+    id: "task-current",
+    jobClass: "task",
+    status: "rejected",
+    sessionId: "owner-a",
+    threadId: "claude-current",
+    chainRootId: "task-root",
+    chainBaseline: { head: "baseline-head" },
+    createdAt: "2026-07-14T10:00:00.000Z",
+    completedAt: "2026-07-14T10:10:00.000Z",
+    updatedAt: "2026-07-14T10:10:00.000Z",
+  },
+  {
+    id: "task-other-owner",
+    jobClass: "task",
+    status: "scope_change_requested",
+    sessionId: "owner-b",
+    threadId: "claude-other",
+    createdAt: "2026-07-14T11:00:00.000Z",
+    completedAt: "2026-07-14T11:10:00.000Z",
+  },
+  {
+    id: "task-no-claude-session",
+    jobClass: "task",
+    status: "completed",
+    sessionId: "owner-a",
+    createdAt: "2026-07-14T12:00:00.000Z",
+    completedAt: "2026-07-14T12:10:00.000Z",
+  },
+];
+assert.equal(
+  resolveTaskResumeCandidate(resumeJobs, { ownerSessionId: "owner-a" }).id,
+  "task-current"
+);
+assert.equal(
+  resolveTaskResumeCandidate(resumeJobs, {
+    ownerSessionId: "owner-a",
+    reference: "task-current",
+  }).threadId,
+  "claude-current"
+);
+assert.equal(
+  resolveTaskResumeCandidate(resumeJobs, {
+    ownerSessionId: "owner-a",
+    reference: "task-other-owner",
+  }).threadId,
+  "claude-other"
+);
+assert.equal(sortJobsNewestFirst(resumeJobs)[0].id, "task-no-claude-session");
+const resumedChain = buildTaskChainContext(
+  "task-correction",
+  resumeJobs[1],
+  { head: "new-head" }
+);
+assert.deepEqual(resumedChain, {
+  parentJobId: "task-current",
+  chainRootId: "task-root",
+  chainBaseline: { head: "baseline-head" },
+});
 for (const operation of ["add", "commit", "push", "tag", "switch", "rm", "mv", "apply"]) {
   assert.ok(
     SUPERVISED_GIT_WRITE_TOOLS.some((pattern) => pattern.startsWith(`Bash(git ${operation}`)),
@@ -254,6 +343,80 @@ try {
   const previousCodexHome = process.env.CODEX_HOME;
   const testCodexHome = path.join(tempRoot, "codex-home");
   process.env.CODEX_HOME = testCodexHome;
+  const helpResult = spawnSync(process.execPath, [companionPath, "task", "--help"], {
+    cwd: tempRoot,
+    encoding: "utf8",
+    env: { ...process.env, CODEX_HOME: testCodexHome },
+  });
+  assert.equal(helpResult.status, 0, helpResult.stderr);
+  assert.match(helpResult.stdout, /Usage:/);
+  assert.equal(listJobs(tempRoot).length, 0);
+  writeJobFile(tempRoot, "task-chronology-old", {
+    id: "task-chronology-old",
+    kind: "task",
+    jobClass: "task",
+    status: "completed",
+    phase: "done",
+    createdAt: "2026-07-13T10:00:00.000Z",
+    completedAt: "2026-07-13T10:10:00.000Z",
+    updatedAt: "2026-07-13T10:10:00.000Z",
+    result: { status: "completed" },
+  });
+  writeJobFile(tempRoot, "task-chronology-new", {
+    id: "task-chronology-new",
+    kind: "task",
+    jobClass: "task",
+    status: "completed",
+    phase: "done",
+    createdAt: "2026-07-14T10:00:00.000Z",
+    completedAt: "2026-07-14T10:10:00.000Z",
+    updatedAt: "2026-07-14T10:10:00.000Z",
+    result: { status: "completed" },
+  });
+  const viewOldResult = spawnSync(
+    process.execPath,
+    [companionPath, "result", "task-chronology-old", "--json"],
+    { cwd: tempRoot, encoding: "utf8", env: { ...process.env, CODEX_HOME: testCodexHome } }
+  );
+  assert.equal(viewOldResult.status, 0, viewOldResult.stderr);
+  const chronologyStatus = spawnSync(
+    process.execPath,
+    [companionPath, "status", "--all", "--json"],
+    { cwd: tempRoot, encoding: "utf8", env: { ...process.env, CODEX_HOME: testCodexHome } }
+  );
+  assert.equal(chronologyStatus.status, 0, chronologyStatus.stderr);
+  assert.equal(JSON.parse(chronologyStatus.stdout).latestFinished.id, "task-chronology-new");
+
+  writeJobFile(tempRoot, "task-resume-cli", {
+    id: "task-resume-cli",
+    kind: "task",
+    jobClass: "task",
+    status: "rejected",
+    phase: "rejected",
+    sessionId: "owner-resume-cli",
+    threadId: "claude-resume-cli",
+    createdAt: "2026-07-15T10:00:00.000Z",
+    completedAt: "2026-07-15T10:10:00.000Z",
+    updatedAt: "2026-07-15T10:10:00.000Z",
+    result: { status: "completed", sessionId: "claude-resume-cli" },
+  });
+  const resumeCandidateResult = spawnSync(
+    process.execPath,
+    [companionPath, "task-resume-candidate", "--json"],
+    {
+      cwd: tempRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CODEX_HOME: testCodexHome,
+        CLAUDE_COMPANION_SESSION_ID: "owner-resume-cli",
+      },
+    }
+  );
+  assert.equal(resumeCandidateResult.status, 0, resumeCandidateResult.stderr);
+  const resumeCandidatePayload = JSON.parse(resumeCandidateResult.stdout);
+  assert.equal(resumeCandidatePayload.candidate.id, "task-resume-cli");
+  assert.equal(resumeCandidatePayload.candidate.claudeSessionId, "claude-resume-cli");
   const baseJob = {
     kind: "task",
     jobClass: "task",
@@ -321,6 +484,22 @@ try {
     status: "awaiting_review",
     phase: "awaiting_review",
   });
+  writeJobFile(tempRoot, "task-scope-hook-test", {
+    ...baseJob,
+    id: "task-scope-hook-test",
+    sessionId: "session-hook-test",
+    status: "scope_change_requested",
+    phase: "scope_change_requested",
+    result: {
+      supervision: {
+        acceptanceState: "scope_change_requested",
+        scopeChangeRequest: {
+          paths: ["scripts/smoke-test.mjs"],
+          reason: "required verification fails",
+        },
+      },
+    },
+  });
   const unreadHookPath = path.resolve("hooks", "unread-result-hook.mjs");
   const hookEnv = {
     ...process.env,
@@ -341,7 +520,9 @@ try {
   assert.equal(firstNotification.status, 0, firstNotification.stderr);
   assert.match(firstNotification.stdout, /awaiting-review result/i);
   assert.match(firstNotification.stdout, /accept or reject the todo/i);
+  assert.match(firstNotification.stdout, /requested additional allowed paths/i);
   assert.ok(readJobFile(tempRoot, "task-hook-test").notifiedAt);
+  assert.ok(readJobFile(tempRoot, "task-scope-hook-test").notifiedAt);
 
   const repeatedNotification = spawnSync(process.execPath, [unreadHookPath], {
     cwd: tempRoot,

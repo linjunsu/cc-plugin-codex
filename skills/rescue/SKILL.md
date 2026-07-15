@@ -1,6 +1,6 @@
 ---
 name: rescue
-description: 'Run a Claude Code diagnosis or implementation under active Codex supervision. Codex owns intent classification, todo boundaries, live monitoring, steering, independent verification, acceptance, and any final Git commit. Args include --mode, --background, --resume, --resume-job, --fresh, --model, --effort, and task text.'
+description: 'Run a Claude Code diagnosis or implementation under active Codex supervision. Codex owns intent classification, todo boundaries, live monitoring, steering, independent verification, acceptance, and any final Git commit. Args include --mode, --background, --visible-terminal, --group-id, --depends-on, --locks, --resume, --resume-job, --fresh, --model, --effort, and task text.'
 ---
 
 # Claude Code Rescue Under Codex Supervision
@@ -15,6 +15,12 @@ node "<plugin-root>/scripts/claude-companion.mjs" ...
 
 Raw slash-command arguments:
 `$ARGUMENTS`
+
+Useful coordination flags:
+- `--visible-terminal`: open a separate OS terminal that tails this job's tracked log while Codex keeps structured supervision.
+- `--group-id <id>`: attach the job to a larger Codex plan.
+- `--depends-on <job-ids>`: require one or more prior jobs to be completed before this job starts.
+- `--locks <paths>`: declare file or directory locks so concurrent jobs with overlapping locks cannot both run.
 
 ## 1. Preserve User Authorization
 

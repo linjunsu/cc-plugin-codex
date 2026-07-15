@@ -19,7 +19,7 @@
  *
  * Subcommands:
  *   setup, review, adversarial-review, task, task-worker,
- *   status, log, result, cancel, task-resume-candidate
+ *   status, log, events, group, result, cancel, task-resume-candidate
  */
 
 import { spawn } from "node:child_process";
@@ -89,6 +89,7 @@ import {
   patchJob,
   JOB_RESERVATION_SUFFIX,
   resolveJobsDir,
+  resolveJobEventsFile,
   resolveJobLogFile,
   resolveJobSteerFile,
   sanitizeId,
@@ -147,13 +148,15 @@ function printUsage() {
       "  node scripts/claude-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>]",
       "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>] [focus text]",
-      "  node scripts/claude-companion.mjs task [--mode <diagnose|implement|publish|autonomous>] [--contract-file <path>] [--todo-id <id>] [--acceptance <text>] [--allowed-paths <paths>] [--verify <command>] [--resume|--resume-job <job-id>|--fresh] [--model <model>] [--effort <level>] [prompt]",
+      "  node scripts/claude-companion.mjs task [--mode <diagnose|implement|publish|autonomous>] [--contract-file <path>] [--todo-id <id>] [--acceptance <text>] [--allowed-paths <paths>] [--verify <command>] [--group-id <id>] [--depends-on <job-ids>] [--locks <paths>] [--visible-terminal] [--resume|--resume-job <job-id>|--fresh] [--model <model>] [--effort <level>] [prompt]",
       "  node scripts/claude-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/claude-companion.mjs log [job-id] [--tail <lines>] [--all] [--json]",
+      "  node scripts/claude-companion.mjs events [job-id] [--tail <lines>] [--all] [--json]",
+      "  node scripts/claude-companion.mjs group [group-id] [--all] [--json]",
       "  node scripts/claude-companion.mjs result [job-id] [--json]",
       "  node scripts/claude-companion.mjs steer [job-id] <instruction> [--json]",
       "  node scripts/claude-companion.mjs accept [job-id] [note] [--json]",
-      "  node scripts/claude-companion.mjs reject [job-id] [reason] [--json]",
+      "  node scripts/claude-companion.mjs reject [job-id] [--fault <claude|codex-contract|environment|user-scope-change>] [reason] [--json]",
       "  node scripts/claude-companion.mjs cancel [job-id] [--json]",
       "  node scripts/claude-companion.mjs session-routing-context [--cwd <path>] [--json]",
       "  node scripts/claude-companion.mjs background-routing-context --kind <review|task> [--cwd <path>] [--json]",
@@ -234,6 +237,15 @@ function resolveOwnerSessionId(value) {
     throw new Error(`Invalid session ID: ${trimmed}`);
   }
   return sanitizeId(trimmed, "session ID");
+}
+
+function resolveOptionalMetadataId(value, label) {
+  const trimmed = value == null ? "" : String(value).trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("--")) {
+    throw new Error(`Invalid ${label}: ${trimmed}`);
+  }
+  return sanitizeId(trimmed, label);
 }
 
 function resolveParentThreadId() {
@@ -1159,15 +1171,118 @@ function releaseReservedJobId(workspaceRoot, jobId) {
   } catch {}
 }
 
+function escapePowerShellSingleQuoted(value) {
+  return String(value ?? "").replace(/'/g, "''");
+}
+
+function shellSingleQuote(value) {
+  return `'${String(value ?? "").replace(/'/g, "'\\''")}'`;
+}
+
+function escapeAppleScriptString(value) {
+  return String(value ?? "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function openVisibleLogTerminal(job, logFile) {
+  if (!logFile) return null;
+  const title = `cc ${job.id}`;
+
+  try {
+    let launcher;
+    if (process.platform === "win32") {
+      const quotedTitle = escapePowerShellSingleQuoted(title);
+      const quotedLogFile = escapePowerShellSingleQuoted(logFile);
+      const command = [
+        `$Host.UI.RawUI.WindowTitle = '${quotedTitle}'`,
+        `Write-Host 'Claude Code visible log: ${quotedTitle}'`,
+        `Write-Host 'Log: ${quotedLogFile}'`,
+        "Write-Host ''",
+        `Get-Content -LiteralPath '${quotedLogFile}' -Tail 120 -Wait`
+      ].join("; ");
+      launcher = spawn(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          `Start-Process -FilePath powershell.exe -ArgumentList @('-NoExit','-NoProfile','-ExecutionPolicy','Bypass','-Command','${escapePowerShellSingleQuoted(command)}') -WindowStyle Normal`
+        ],
+        {
+          cwd: job.workspaceRoot,
+          env: process.env,
+          detached: true,
+          stdio: "ignore",
+          windowsHide: false
+        }
+      );
+    } else if (process.platform === "darwin") {
+      const shellCommand = `printf '%s\\n' ${shellSingleQuote(`Claude Code visible log: ${title}`)}; tail -n 120 -f ${shellSingleQuote(logFile)}`;
+      const script = [
+        `tell application "Terminal"`,
+        `  do script "${escapeAppleScriptString(shellCommand)}"`,
+        `  set custom title of front window to "${escapeAppleScriptString(title)}"`,
+        `end tell`
+      ].join("\n");
+      launcher = spawn("osascript", ["-e", script], {
+        cwd: job.workspaceRoot,
+        env: process.env,
+        detached: true,
+        stdio: "ignore",
+      });
+    } else {
+      throw new Error("--visible-terminal is currently implemented for Windows and macOS.");
+    }
+    launcher.unref();
+    appendJobEvent(job.workspaceRoot, job.id, {
+      type: "visible-terminal",
+      status: "opened",
+      title,
+      logFile,
+    });
+    appendLogLine(logFile, `Visible log terminal requested: ${title}`);
+    patchJob(job.workspaceRoot, job.id, {
+      visibleTerminal: {
+        requestedAt: nowIso(),
+        title,
+      },
+    });
+    return { title };
+  } catch (error) {
+    const note = error instanceof Error ? error.message : String(error);
+    appendJobEvent(job.workspaceRoot, job.id, {
+      type: "visible-terminal",
+      status: "failed",
+      note,
+    });
+    appendLogLine(logFile, `Visible log terminal failed: ${note}`);
+    return null;
+  }
+}
 
 function createTrackedProgress(job, options = {}) {
   const logFile = createJobLogFile(job.workspaceRoot, job.id, job.title);
+  const updateProgress = createJobProgressUpdater(job.workspaceRoot, job.id);
   return {
     logFile,
     progress: createProgressReporter({
       stderr: Boolean(options.stderr),
       logFile,
-      onEvent: createJobProgressUpdater(job.workspaceRoot, job.id)
+      onEvent: (event) => {
+        updateProgress(event);
+        appendJobEvent(job.workspaceRoot, job.id, {
+          type: event.kind ?? "progress",
+          kind: event.kind ?? null,
+          phase: event.phase ?? null,
+          tool: event.tool ?? null,
+          file: event.file ?? null,
+          command: event.command ?? null,
+          mutates: Boolean(event.mutates),
+          message: event.message ?? null,
+          threadId: event.threadId ?? null,
+          turnId: event.turnId ?? null,
+        });
+      }
     })
   };
 }
@@ -1247,7 +1362,8 @@ function buildTaskJob(
   mode,
   contract,
   ownerSessionId = null,
-  explicitJobId = null
+  explicitJobId = null,
+  metadata = {}
 ) {
   return createCompanionJob({
     prefix: "task",
@@ -1260,7 +1376,8 @@ function buildTaskJob(
     mode,
     contract,
     sessionId: ownerSessionId,
-    explicitJobId
+    explicitJobId,
+    ...metadata
   });
 }
 
@@ -1279,7 +1396,8 @@ function buildTaskRequest({
   parentJobId,
   jobId,
   steerFile,
-  markViewedOnSuccess
+  markViewedOnSuccess,
+  visibleTerminal = false
 }) {
   return {
     cwd,
@@ -1296,7 +1414,8 @@ function buildTaskRequest({
     parentJobId,
     jobId,
     steerFile,
-    markViewedOnSuccess
+    markViewedOnSuccess,
+    visibleTerminal
   };
 }
 
@@ -1377,6 +1496,48 @@ function uniqueNonEmptyStrings(values) {
   );
 }
 
+function normalizeListOption(value) {
+  if (Array.isArray(value)) {
+    return uniqueNonEmptyStrings(value.flatMap((item) => String(item).split(",")));
+  }
+  return uniqueNonEmptyStrings(String(value ?? "").split(","));
+}
+
+function locksOverlap(left = [], right = []) {
+  const normalizedLeft = normalizeListOption(left);
+  const normalizedRight = normalizeListOption(right);
+  return normalizedLeft.some((item) => normalizedRight.includes(item));
+}
+
+function assertTaskDependenciesComplete(workspaceRoot, dependencies) {
+  const required = normalizeListOption(dependencies);
+  if (required.length === 0) return;
+  const jobsById = new Map(listJobs(workspaceRoot).map((job) => [job.id, job]));
+  const incomplete = required.filter((jobId) => jobsById.get(jobId)?.status !== "completed");
+  if (incomplete.length > 0) {
+    throw new Error(
+      `Task dependencies are not completed: ${incomplete.join(", ")}.`
+    );
+  }
+}
+
+function assertTaskLocksAvailable(workspaceRoot, locks, currentJobId = null) {
+  const requestedLocks = normalizeListOption(locks);
+  if (requestedLocks.length === 0) return;
+  const conflicting = listJobs(workspaceRoot).find(
+    (job) =>
+      job.id !== currentJobId &&
+      job.jobClass === "task" &&
+      isActiveJobStatus(job.status) &&
+      locksOverlap(requestedLocks, job.locks ?? [])
+  );
+  if (conflicting) {
+    throw new Error(
+      `Task lock conflict: ${conflicting.id} is active with overlapping lock(s): ${(conflicting.locks ?? []).join(", ")}.`
+    );
+  }
+}
+
 function readLogTail(logFile, maxLines) {
   if (!logFile || !fs.existsSync(logFile)) return [];
   const count = Math.min(1000, Math.max(1, Number(maxLines) || 160));
@@ -1385,6 +1546,56 @@ function readLogTail(logFile, maxLines) {
     .split(/\r?\n/)
     .filter((line) => line.trim())
     .slice(-count);
+}
+
+function appendJobEvent(workspaceRoot, jobId, event) {
+  const eventsFile = resolveJobEventsFile(workspaceRoot, jobId);
+  fs.mkdirSync(path.dirname(eventsFile), { recursive: true, mode: 0o700 });
+  fs.appendFileSync(
+    eventsFile,
+    `${JSON.stringify({
+      timestamp: nowIso(),
+      jobId,
+      ...event,
+    })}\n`,
+    { encoding: "utf8", mode: 0o600 }
+  );
+}
+
+function readJobEventsTail(eventsFile, maxLines) {
+  if (!eventsFile || !fs.existsSync(eventsFile)) return [];
+  const count = Math.min(1000, Math.max(1, Number(maxLines) || 160));
+  return fs
+    .readFileSync(eventsFile, "utf8")
+    .split(/\r?\n/)
+    .filter((line) => line.trim())
+    .slice(-count)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return { malformed: true, raw: line };
+      }
+    });
+}
+
+function formatEventForTerminal(event) {
+  const time = String(event.timestamp ?? "").replace(/^.*T/, "").replace(/\.\d+Z$/, "Z");
+  const type = event.type ?? event.kind ?? "event";
+  if (type === "tool_use" || event.kind === "tool_use") {
+    const target = event.file || event.command || event.message || "";
+    return `[${time}] ${event.tool ?? "Tool"}${event.mutates ? " *" : ""} ${target}`.trimEnd();
+  }
+  if (type === "decision") {
+    return `[${time}] ${String(event.decision ?? "decision").toUpperCase()} ${event.note ?? event.reason ?? ""}`.trimEnd();
+  }
+  if (type === "steer") {
+    return `[${time}] STEER ${event.instruction ?? ""}`.trimEnd();
+  }
+  if (type === "visible-terminal") {
+    return `[${time}] VISIBLE ${event.status ?? ""} ${event.note ?? ""}`.trimEnd();
+  }
+  return `[${time}] ${type} ${event.message ?? event.note ?? ""}`.trimEnd();
 }
 
 function resolveLogJobSnapshot(cwd, reference, options = {}) {
@@ -1411,6 +1622,52 @@ function renderJobLogReport(payload) {
     lines.push("No log output captured.");
   } else {
     lines.push("```text", ...payload.lines, "```");
+  }
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function renderJobEventsReport(payload) {
+  const lines = [
+    "# Claude Code Job Events",
+    "",
+    `Job: \`${payload.job.id}\``,
+    `Status: ${payload.job.status ?? "unknown"}`,
+    `Tail: last ${payload.tailLines} event(s)`,
+    "",
+  ];
+  if (payload.events.length === 0) {
+    lines.push("No structured events captured.");
+  } else {
+    lines.push("```text");
+    for (const event of payload.events) {
+      lines.push(formatEventForTerminal(event));
+    }
+    lines.push("```");
+  }
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function renderTaskGroupReport(payload) {
+  const lines = [
+    "# Claude Code Task Group",
+    "",
+    `Group: \`${payload.groupId ?? "unassigned"}\``,
+    `Workspace: ${payload.workspaceRoot}`,
+    "",
+  ];
+  if (payload.jobs.length === 0) {
+    lines.push("No jobs found for this group.");
+  } else {
+    lines.push("| Job | Status | Todo | Locks | Depends on | Updated |");
+    lines.push("|---|---|---|---|---|---|");
+    for (const job of payload.jobs) {
+      const todo = job.contract?.activeTodo?.id ?? "";
+      const locks = Array.isArray(job.locks) ? job.locks.join(", ") : "";
+      const dependsOn = Array.isArray(job.dependsOn) ? job.dependsOn.join(", ") : "";
+      lines.push(
+        `| \`${job.id}\` | ${job.status ?? ""} | ${todo} | ${locks} | ${dependsOn} | ${job.updatedAt ?? ""} |`
+      );
+    }
   }
   return `${lines.join("\n").trimEnd()}\n`;
 }
@@ -1445,6 +1702,9 @@ async function runForegroundCommand(job, runner, options = {}) {
     logFile: options.logFile,
     stderr: !options.json && !options.quietProgress
   });
+  if (options.visibleTerminal) {
+    openVisibleLogTerminal(job, logFile);
+  }
   const execution = await runTrackedJob(
     job,
     (onSpawn) => runner(progress, onSpawn),
@@ -1493,6 +1753,9 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 function enqueueBackgroundTask(cwd, job, request) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
+  if (request.visibleTerminal) {
+    openVisibleLogTerminal(job, logFile);
+  }
 
   const queuedRecord = {
     ...job,
@@ -1721,11 +1984,12 @@ async function handleTask(argv) {
     valueOptions: [
       "model", "effort", "cwd", "prompt-file", "view-state", "owner-session-id", "job-id",
       "mode", "contract-file", "todo-id", "acceptance", "allowed-paths", "verify",
-      "resume-job",
+      "resume-job", "group-id", "depends-on", "locks",
     ],
     booleanOptions: [
       "json",
       "quiet-progress",
+      "visible-terminal",
       "write",
       "resume-last",
       "resume",
@@ -1755,6 +2019,9 @@ async function handleTask(argv) {
     throw new Error("--write conflicts with --mode diagnose.");
   }
   const contractSource = readTaskContract(cwd, options["contract-file"]);
+  const groupId = resolveOptionalMetadataId(options["group-id"], "group ID");
+  const dependsOn = normalizeListOption(options["depends-on"]);
+  const locks = normalizeListOption(options.locks);
   const contract = buildTaskContract({
     mode,
     write: Boolean(options.write),
@@ -1818,6 +2085,10 @@ async function handleTask(argv) {
     if (options.background) {
       requireTaskRequest(prompt, resumeLast);
     }
+    if (!resumeLast) {
+      assertTaskDependenciesComplete(workspaceRoot, dependsOn);
+    }
+    assertTaskLocksAvailable(workspaceRoot, locks, explicitJobId);
 
     const job = buildTaskJob(
       workspaceRoot,
@@ -1826,7 +2097,13 @@ async function handleTask(argv) {
       mode,
       contract,
       ownerSessionId,
-      explicitJobId
+      explicitJobId,
+      {
+        ...(groupId ? { groupId } : {}),
+        ...(dependsOn.length ? { dependsOn } : {}),
+        ...(locks.length ? { locks } : {}),
+        ...(options["visible-terminal"] ? { visibleTerminalRequested: true } : {}),
+      }
     );
     const chain = buildTaskChainContext(
       job.id,
@@ -1834,6 +2111,15 @@ async function handleTask(argv) {
       captureWorkspaceSnapshot(workspaceRoot)
     );
     Object.assign(job, chain);
+    appendJobEvent(workspaceRoot, job.id, {
+      type: "task-created",
+      mode,
+      groupId: job.groupId ?? null,
+      dependsOn: job.dependsOn ?? [],
+      locks: job.locks ?? [],
+      resumeJobId: resumeTarget?.job?.id ?? null,
+      visibleTerminal: Boolean(options["visible-terminal"]),
+    });
     const { chainBaseline } = chain;
     const steerFile = resolveJobSteerFile(workspaceRoot, job.id);
 
@@ -1853,7 +2139,8 @@ async function handleTask(argv) {
         parentJobId: job.parentJobId,
         jobId: job.id,
         steerFile,
-        markViewedOnSuccess
+        markViewedOnSuccess,
+        visibleTerminal: Boolean(options["visible-terminal"])
       });
       const { payload } = enqueueBackgroundTask(cwd, job, request);
       outputCommandResult(
@@ -1888,7 +2175,8 @@ async function handleTask(argv) {
       {
         json: options.json,
         markViewedOnSuccess,
-        quietProgress: Boolean(options["quiet-progress"])
+        quietProgress: Boolean(options["quiet-progress"]),
+        visibleTerminal: Boolean(options["visible-terminal"])
       }
     );
   });
@@ -2102,6 +2390,61 @@ function handleLog(argv) {
   outputCommandResult(payload, renderJobLogReport(payload), options.json);
 }
 
+function handleEvents(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "tail"],
+    booleanOptions: ["json", "all"]
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const reference = positionals[0] ?? "";
+  const snapshot = resolveLogJobSnapshot(cwd, reference, {
+    all: Boolean(options.all)
+  });
+  const eventsFile = resolveJobEventsFile(snapshot.workspaceRoot, snapshot.job.id);
+  const tailLines = Math.min(1000, Math.max(1, Number(options.tail) || 160));
+  const payload = {
+    workspaceRoot: snapshot.workspaceRoot,
+    job: {
+      id: snapshot.job.id,
+      status: snapshot.job.status,
+      phase: snapshot.job.phase ?? null,
+      summary: snapshot.job.summary ?? null,
+      startedAt: snapshot.job.startedAt ?? null,
+      completedAt: snapshot.job.completedAt ?? null,
+    },
+    tailLines,
+    events: readJobEventsTail(eventsFile, tailLines)
+  };
+
+  outputCommandResult(payload, renderJobEventsReport(payload), options.json);
+}
+
+function handleGroup(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json", "all"]
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+  const groupId = positionals[0] ? resolveOptionalMetadataId(positionals[0], "group ID") : null;
+  const jobs = listJobs(workspaceRoot)
+    .filter((job) => job.jobClass === "task")
+    .filter((job) => {
+      if (groupId) return job.groupId === groupId;
+      return options.all || job.groupId == null;
+    })
+    .sort((a, b) => Date.parse(a.createdAt ?? "") - Date.parse(b.createdAt ?? ""));
+  const payload = {
+    workspaceRoot,
+    groupId,
+    jobs,
+  };
+
+  outputCommandResult(payload, renderTaskGroupReport(payload), options.json);
+}
+
 function handleSteer(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
@@ -2126,6 +2469,11 @@ function handleSteer(argv) {
     steerCount: Number(stored.steerCount ?? 0) + 1,
     lastSteeredAt: nowIso(),
   });
+  appendJobEvent(workspaceRoot, job.id, {
+    type: "steer",
+    instruction,
+    status: "queued",
+  });
   appendLogLine(resolveJobLogFile(workspaceRoot, job.id), "Steering instruction queued by Codex.");
   outputCommandResult(
     { jobId: job.id, status: job.status, queued: true },
@@ -2134,7 +2482,7 @@ function handleSteer(argv) {
   );
 }
 
-function updateAcceptanceState(cwd, reference, nextStatus, note, asJson) {
+function updateAcceptanceState(cwd, reference, nextStatus, note, asJson, metadata = {}) {
   const snapshot = buildSingleJobSnapshot(cwd, reference);
   const { workspaceRoot, job } = snapshot;
   if (job.status !== "awaiting_review") {
@@ -2145,6 +2493,7 @@ function updateAcceptanceState(cwd, reference, nextStatus, note, asJson) {
   const stored = readStoredJob(workspaceRoot, job.id) ?? job;
   const timestamp = nowIso();
   const acceptanceState = nextStatus === "completed" ? "accepted" : "rejected";
+  const decision = nextStatus === "completed" ? "accept" : "reject";
   const result = stored.result && typeof stored.result === "object"
     ? {
         ...stored.result,
@@ -2172,6 +2521,13 @@ function updateAcceptanceState(cwd, reference, nextStatus, note, asJson) {
   if (!transition.transitioned) {
     throw new Error(`Job ${job.id} changed state before the review decision was saved.`);
   }
+  appendJobEvent(workspaceRoot, job.id, {
+    type: "decision",
+    decision,
+    status: nextStatus,
+    note: note || null,
+    fault: nextStatus === "completed" ? null : metadata.fault ?? "unspecified",
+  });
   appendLogLine(resolveJobLogFile(workspaceRoot, job.id), `Codex ${label} the checkpoint.${note ? ` ${note}` : ""}`);
   outputCommandResult(
     { jobId: job.id, status: nextStatus, note: note || null },
@@ -2193,13 +2549,15 @@ function handleAccept(argv) {
 
 function handleReject(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd"],
+    valueOptions: ["cwd", "fault"],
     booleanOptions: ["json"],
   });
   const cwd = resolveCommandCwd(options);
   const reference = positionals.shift() ?? "";
   if (!reference) throw new Error("Usage: reject <job-id> [reason].");
-  updateAcceptanceState(cwd, reference, "rejected", positionals.join(" ").trim(), options.json);
+  updateAcceptanceState(cwd, reference, "rejected", positionals.join(" ").trim(), options.json, {
+    fault: options.fault ? String(options.fault).trim() : undefined,
+  });
 }
 
 function handleTaskResumeCandidate(argv) {
@@ -2375,6 +2733,13 @@ async function handleCancel(argv) {
   }
 
   appendLogLine(jobLogFile, `Cancel result: ${finalStatus}`);
+  appendJobEvent(workspaceRoot, job.id, {
+    type: "decision",
+    decision: "cancel",
+    status: finalStatus,
+    note: cancelResult.note ?? null,
+    fault: finalStatus === "cancelled" ? null : "environment",
+  });
   cleanupOldJobs(workspaceRoot);
 
   const nextJob = { ...job, status: finalStatus, phase: finalStatus };
@@ -2427,6 +2792,12 @@ async function main() {
       break;
     case "log":
       handleLog(argv);
+      break;
+    case "events":
+      handleEvents(argv);
+      break;
+    case "group":
+      handleGroup(argv);
       break;
     case "steer":
       handleSteer(argv);

@@ -316,6 +316,11 @@ export function resolveJobSteerFile(cwd, jobId) {
   return path.join(resolveJobsDir(cwd), `${jobId}.steer.jsonl`);
 }
 
+export function resolveJobEventsFile(cwd, jobId) {
+  sanitizeId(jobId, "job ID");
+  return path.join(resolveJobsDir(cwd), `${jobId}.events.jsonl`);
+}
+
 export function generateJobId(prefix = "job") {
   const random = Math.random().toString(36).slice(2, 8);
   return `${prefix}-${Date.now().toString(36)}-${random}`;

@@ -112,6 +112,7 @@ This removes `cc@personal` from Codex and removes the personal marketplace entry
 | `$cc:status` | List running and recent Claude Code jobs, or inspect one job |
 | `$cc:result` | Open the output of a finished tracked job |
 | `$cc:log` | Show the recent execution log for a tracked job |
+| `$cc:events` | Show structured tool, steering, visible-terminal, and accept/reject events |
 | `$cc:cancel` | Cancel an active tracked job |
 | `$cc:setup` | Verify Claude Code, Codex plugin hooks, auth, and review gate state |
 
@@ -151,6 +152,7 @@ $cc:rescue investigate why the tests started failing
 $cc:rescue fix the failing test with the smallest safe patch
 $cc:rescue --mode diagnose explain the citation numbering bug
 $cc:rescue --mode implement --fresh implement the missing validation
+$cc:rescue --visible-terminal fix the failing test while I watch the live log
 $cc:rescue --resume continue the previous Claude Code run
 $cc:rescue --resume-job task-abc123 continue an exact rejected checkpoint
 $cc:rescue --autonomous --background run this without active supervision
@@ -158,9 +160,13 @@ $cc:rescue --autonomous --background run this without active supervision
 
 Foreground supervision is the default. Codex classifies read-only questions such as "why" or "investigate" as `diagnose`; explicit change requests such as "fix" or "implement" use `implement`. Repository instructions constrain authorized work but never grant permission by themselves.
 
-Flags: `--mode <diagnose|implement|publish|autonomous>`, `--autonomous`, `--background`, `--resume`, `--resume-last`, `--resume-job <job-id>`, `--fresh`, `--write` (legacy autonomous compatibility), `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--prompt-file <path>`, `--contract-file <path>`, `--todo-id <id>`, `--acceptance <text>`, `--allowed-paths <paths>`, `--verify <command>`.
+Flags: `--mode <diagnose|implement|publish|autonomous>`, `--autonomous`, `--background`, `--resume`, `--resume-last`, `--resume-job <job-id>`, `--fresh`, `--write` (legacy autonomous compatibility), `--model <model>`, `--effort <low|medium|high|xhigh|max>`, `--prompt-file <path>`, `--contract-file <path>`, `--todo-id <id>`, `--acceptance <text>`, `--allowed-paths <paths>`, `--verify <command>`, `--visible-terminal`, `--group-id <id>`, `--depends-on <job-ids>`, `--locks <paths>`.
 
 Supervised modes are foreground-only. Background mode requires explicit `--autonomous` because a detached Codex turn cannot perform semantic acceptance in real time.
+
+`--visible-terminal` opens a separate OS terminal that tails the tracked job log. It intentionally does not switch Claude to the interactive TUI; the companion keeps running `claude -p` with structured stream output so Codex can still see tool events, steer the job, and enforce acceptance. Windows uses a PowerShell window; macOS uses Terminal.app.
+
+`--group-id`, `--depends-on`, and `--locks` are the coordination primitives for larger plans. Independent jobs can share a group id, dependency jobs must already be completed, and overlapping locks prevent two active Claude workers from editing the same declared files or directories at once.
 
 ## Supervision Lifecycle
 
@@ -183,7 +189,7 @@ The companion also exposes internal supervisor controls used by `$cc:rescue`:
 ```text
 node scripts/claude-companion.mjs steer <job-id> "correction"
 node scripts/claude-companion.mjs accept <job-id> "verification evidence"
-node scripts/claude-companion.mjs reject <job-id> "reason"
+node scripts/claude-companion.mjs reject <job-id> --fault claude "reason"
 ```
 
 Users normally do not need to call these directly.
@@ -226,6 +232,28 @@ $cc:log task-abc123 --json
 ```
 
 Use this for historical execution detail. Do not poll it repeatedly for supervised foreground work; Codex receives compact `[cc:event]` records automatically.
+
+### `$cc:events`
+
+```text
+$cc:events
+$cc:events task-abc123 --tail 120
+$cc:events task-abc123 --json
+```
+
+Use this when you need the machine-readable timeline: tool events, visible-terminal launches, steering, cancellation, and accept/reject decisions. Rejections can include a `fault` value such as `claude`, `codex-contract`, `environment`, or `user-scope-change`.
+
+### Task Groups and Parallel Work
+
+The companion does not merge parallel work for Codex. It gives Codex safe coordination markers:
+
+```text
+node scripts/claude-companion.mjs task --group-id plan-a --locks apps/api T1 prompt...
+node scripts/claude-companion.mjs task --group-id plan-a --locks apps/web T2 prompt...
+node scripts/claude-companion.mjs group plan-a
+```
+
+Use locks conservatively. Jobs in different repositories or clearly separate directories can run together; jobs that may edit the same file should use the same lock or run serially. Codex still owns final diff review, conflict handling, and acceptance.
 
 ## Tool Logs
 

@@ -23,13 +23,14 @@ Command selection:
 - The caller's background or foreground choice changes only subagent execution. It does not change the companion command you build.
 
 Routing controls:
-- Treat `--model`, `--effort`, `--resume`, `--resume-last`, `--resume-job`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, and `--job-id` as routing controls, not task text.
+- Treat `--model`, `--effort`, `--resume`, `--resume-last`, `--resume-job`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, `--job-id`, `--visible-terminal`, `--group-id`, `--depends-on`, and `--locks` as routing controls, not task text.
 - Leave `--model` and `--effort` unset unless the user explicitly asks for a specific model or effort. The companion command applies these defaults itself: model defaults to `opus`, effort defaults to `xhigh` for opus, `high` for sonnet, and is left unset for haiku.
 - `--view-state on-success` means the user will see this companion result in the current turn, so the companion may mark it viewed on success.
 - `--view-state defer` means the parent is not waiting, so the companion must leave the result unread until the user explicitly checks it.
 - `--owner-session-id <session-id>` is an internal parent-session routing control. Preserve it when present so tracked jobs remain visible to the parent session's `$cc:status` / `$cc:result`.
 - Never emit an empty routing placeholder such as `--owner-session-id  --job-id`.
 - Do not add `--quiet-progress` by default for built-in rescue forwarding. Let companion stderr progress remain available in the spawned agent thread.
+- Preserve `--visible-terminal`, `--group-id`, `--depends-on`, and `--locks` when the parent supplied them; they are companion coordination controls.
 - If the free-text task begins with `/`, treat that slash command as literal Claude Code task text to forward unchanged. Do not execute it as a local Codex slash command or answer it inline.
 - If the forwarded request includes `--resume-job <job-id>`, continue that exact tracked Claude Code task. Bare `--resume` or `--resume-last` may continue only the current owning Codex session's latest resumable task.
 - If the forwarded request includes `--fresh`, start a new task.

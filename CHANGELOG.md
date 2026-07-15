@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.4.0
+
+- Add `--visible-terminal` for supervised task runs. It opens a separate Windows PowerShell or macOS Terminal window that tails the tracked job log while the companion keeps using structured `claude -p` output for Codex supervision.
+- Persist structured job events to `<job-id>.events.jsonl` and expose them with the new `events` subcommand, covering tool use, visible-terminal launches, steering, cancellation, and accept/reject decisions.
+- Add `reject --fault <claude|codex-contract|environment|user-scope-change>` so rejection records can distinguish implementation defects, contract mistakes, environment failures, and user-driven scope changes.
+- Add task grouping and parallel-safety primitives with `--group-id`, `--depends-on`, `--locks`, and the `group` subcommand so Codex can coordinate multiple independent Claude workers without losing file-conflict guardrails.
+
 ## v1.3.3
 
 - Add exact `--resume-job <job-id>` continuation, restrict implicit resume to the owning Codex session, and preserve the original workspace baseline across rejected or corrected task runs.

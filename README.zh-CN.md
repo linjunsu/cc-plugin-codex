@@ -112,6 +112,7 @@ node scripts/uninstall-personal.mjs
 | `$cc:status` | 列出正在运行和最近完成的 Claude Code 任务，或查看指定任务 |
 | `$cc:result` | 查看已结束任务的结果 |
 | `$cc:log` | 查看任务最近的执行日志 |
+| `$cc:events` | 查看工具、纠偏、可见终端、接受/拒绝等结构化事件 |
 | `$cc:cancel` | 取消仍在运行的任务 |
 | `$cc:setup` | 检查 Claude Code、插件 hook、登录状态和审查门禁配置 |
 
@@ -151,6 +152,7 @@ $cc:rescue 调查测试为什么开始失败
 $cc:rescue 用最小改动修复失败测试
 $cc:rescue --mode diagnose 解释引用编号错误
 $cc:rescue --mode implement --fresh 实现缺失的校验
+$cc:rescue --visible-terminal 修复失败测试，同时打开可见日志终端
 $cc:rescue --resume 继续上一次 Claude Code 任务
 $cc:rescue --resume-job task-abc123 精确续接指定的驳回检查点
 $cc:rescue --autonomous --background 在没有主动监督的情况下运行
@@ -158,9 +160,13 @@ $cc:rescue --autonomous --background 在没有主动监督的情况下运行
 
 默认使用前台监督。Codex 会把“为什么”“调查一下”等只读问题归为 `diagnose`，把“修复”“实现”等明确改动请求归为 `implement`。仓库中的规则文件只约束已获授权的操作方式，不会自行授予修改或发布权限。
 
-参数：`--mode <diagnose|implement|publish|autonomous>`、`--autonomous`、`--background`、`--resume`、`--resume-last`、`--resume-job <job-id>`、`--fresh`、`--write`（兼容旧版 autonomous 模式）、`--model <model>`、`--effort <low|medium|high|xhigh|max>`、`--prompt-file <path>`、`--contract-file <path>`、`--todo-id <id>`、`--acceptance <text>`、`--allowed-paths <paths>`、`--verify <command>`。
+参数：`--mode <diagnose|implement|publish|autonomous>`、`--autonomous`、`--background`、`--resume`、`--resume-last`、`--resume-job <job-id>`、`--fresh`、`--write`（兼容旧版 autonomous 模式）、`--model <model>`、`--effort <low|medium|high|xhigh|max>`、`--prompt-file <path>`、`--contract-file <path>`、`--todo-id <id>`、`--acceptance <text>`、`--allowed-paths <paths>`、`--verify <command>`、`--visible-terminal`、`--group-id <id>`、`--depends-on <job-ids>`、`--locks <paths>`。
 
 受监督模式只能在前台运行。后台任务必须显式使用 `--autonomous`，因为脱离当前 Codex 回合后无法进行实时语义监督和逐项验收。
+
+`--visible-terminal` 会额外打开一个系统终端窗口实时 tail 当前任务日志。它不会把 Claude Code 切换成原生交互 TUI；companion 仍然使用 `claude -p` 的结构化流输出，这样 Codex 还能读取工具事件、发送纠偏并执行验收。Windows 使用 PowerShell 窗口，macOS 使用 Terminal.app。
+
+`--group-id`、`--depends-on`、`--locks` 用于较大计划的任务协调。多个独立任务可以共享一个 group id；依赖任务必须先完成；锁用于声明文件或目录互斥，避免两个 Claude worker 同时修改同一片代码。
 
 ## 监督流程
 
@@ -183,7 +189,7 @@ companion 还提供了供 `$cc:rescue` 内部使用的监督命令：
 ```text
 node scripts/claude-companion.mjs steer <job-id> "纠偏指令"
 node scripts/claude-companion.mjs accept <job-id> "验收证据"
-node scripts/claude-companion.mjs reject <job-id> "拒绝原因"
+node scripts/claude-companion.mjs reject <job-id> --fault claude "拒绝原因"
 ```
 
 普通用户通常不需要直接调用这些命令。
@@ -226,6 +232,28 @@ $cc:log task-abc123 --json
 ```
 
 用于查看历史执行细节。不要在受监督的前台任务中反复轮询日志；Codex 会自动接收精简的 `[cc:event]` 事件。
+
+### `$cc:events`
+
+```text
+$cc:events
+$cc:events task-abc123 --tail 120
+$cc:events task-abc123 --json
+```
+
+用于查看机器可读的任务时间线：工具调用、可见终端启动、纠偏、取消、接受和拒绝。拒绝事件可以带 `fault`，例如 `claude`、`codex-contract`、`environment` 或 `user-scope-change`，方便区分是实现问题、合同问题、环境问题还是需求变更。
+
+### 任务分组与并行执行
+
+companion 不负责替 Codex 合并并行结果，但会提供安全协调标记：
+
+```text
+node scripts/claude-companion.mjs task --group-id plan-a --locks apps/api T1 prompt...
+node scripts/claude-companion.mjs task --group-id plan-a --locks apps/web T2 prompt...
+node scripts/claude-companion.mjs group plan-a
+```
+
+锁要保守使用。不同仓库或明确不同目录的任务可以并行；可能修改同一文件的任务应使用相同锁或串行执行。最终 diff 审查、冲突处理和验收仍由 Codex 负责。
 
 ## 工具日志
 

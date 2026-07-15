@@ -1,6 +1,6 @@
 {
   "name": "cc-plugin-codex",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Codex-supervised Claude Code tasks with checkpoints, steering, verification, and tracked logs",
   "type": "module",
   "author": {

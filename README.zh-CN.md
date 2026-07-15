@@ -164,7 +164,7 @@ $cc:rescue --autonomous --background 在没有主动监督的情况下运行
 
 受监督模式只能在前台运行。后台任务必须显式使用 `--autonomous`，因为脱离当前 Codex 回合后无法进行实时语义监督和逐项验收。
 
-`--visible-terminal` 会额外打开一个系统终端窗口实时 tail 当前任务日志。它不会把 Claude Code 切换成原生交互 TUI；companion 仍然使用 `claude -p` 的结构化流输出，这样 Codex 还能读取工具事件、发送纠偏并执行验收。Windows 使用 PowerShell 窗口，macOS 使用 Terminal.app。
+`--visible-terminal` 会额外打开一个系统终端窗口实时 tail 当前任务日志。它不会把 Claude Code 切换成原生交互 TUI；companion 仍然使用 `claude -p` 的结构化流输出，这样 Codex 还能读取工具事件、发送纠偏并执行验收。Windows 会通过每个任务独立的 `.visible.ps1` 脚本启动 PowerShell 窗口，macOS 使用 Terminal.app。
 
 `--group-id`、`--depends-on`、`--locks` 用于较大计划的任务协调。多个独立任务可以共享一个 group id；依赖任务必须先完成；锁用于声明文件或目录互斥，避免两个 Claude worker 同时修改同一片代码。
 

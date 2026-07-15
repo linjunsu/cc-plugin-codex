@@ -164,7 +164,7 @@ Flags: `--mode <diagnose|implement|publish|autonomous>`, `--autonomous`, `--back
 
 Supervised modes are foreground-only. Background mode requires explicit `--autonomous` because a detached Codex turn cannot perform semantic acceptance in real time.
 
-`--visible-terminal` opens a separate OS terminal that tails the tracked job log. It intentionally does not switch Claude to the interactive TUI; the companion keeps running `claude -p` with structured stream output so Codex can still see tool events, steer the job, and enforce acceptance. Windows uses a PowerShell window; macOS uses Terminal.app.
+`--visible-terminal` opens a separate OS terminal that tails the tracked job log. It intentionally does not switch Claude to the interactive TUI; the companion keeps running `claude -p` with structured stream output so Codex can still see tool events, steer the job, and enforce acceptance. Windows launches a PowerShell window through a per-job `.visible.ps1` script; macOS uses Terminal.app.
 
 `--group-id`, `--depends-on`, and `--locks` are the coordination primitives for larger plans. Independent jobs can share a group id, dependency jobs must already be completed, and overlapping locks prevent two active Claude workers from editing the same declared files or directories at once.
 

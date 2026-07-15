@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.1
+
+- Make Windows `--visible-terminal` launch through a per-job PowerShell script and `Start-Process powershell.exe -File`, avoiding fragile nested command quoting.
+- Read visible-terminal logs as UTF-8 on Windows so symbols and non-ASCII output do not render as mojibake.
+- Record visible terminal launches as `requested` instead of claiming `opened` when the OS launcher only accepted the request.
+
 ## v1.4.0
 
 - Add `--visible-terminal` for supervised task runs. It opens a separate Windows PowerShell or macOS Terminal window that tails the tracked job log while the companion keeps using structured `claude -p` output for Codex supervision.

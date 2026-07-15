@@ -1192,30 +1192,39 @@ function openVisibleLogTerminal(job, logFile) {
     if (process.platform === "win32") {
       const quotedTitle = escapePowerShellSingleQuoted(title);
       const quotedLogFile = escapePowerShellSingleQuoted(logFile);
-      const command = [
-        `$Host.UI.RawUI.WindowTitle = '${quotedTitle}'`,
-        `Write-Host 'Claude Code visible log: ${quotedTitle}'`,
-        `Write-Host 'Log: ${quotedLogFile}'`,
-        "Write-Host ''",
-        `Get-Content -LiteralPath '${quotedLogFile}' -Tail 120 -Wait`
-      ].join("; ");
-      launcher = spawn(
-        "powershell.exe",
+      const launcherFile = path.join(resolveJobsDir(job.workspaceRoot), `${job.id}.visible.ps1`);
+      fs.writeFileSync(
+        launcherFile,
         [
-          "-NoProfile",
-          "-ExecutionPolicy",
-          "Bypass",
-          "-Command",
-          `Start-Process -FilePath powershell.exe -ArgumentList @('-NoExit','-NoProfile','-ExecutionPolicy','Bypass','-Command','${escapePowerShellSingleQuoted(command)}') -WindowStyle Normal`
-        ],
-        {
-          cwd: job.workspaceRoot,
-          env: process.env,
-          detached: true,
-          stdio: "ignore",
-          windowsHide: false
-        }
+          "$ErrorActionPreference = 'Continue'",
+          "try { chcp.com 65001 > $null } catch {}",
+          "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}",
+          "try { $OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}",
+          `try { $Host.UI.RawUI.WindowTitle = '${quotedTitle}' } catch {}`,
+          `Write-Host 'Claude Code visible log: ${quotedTitle}'`,
+          `Write-Host 'Log: ${quotedLogFile}'`,
+          "Write-Host ''",
+          `while (-not (Test-Path -LiteralPath '${quotedLogFile}')) { Start-Sleep -Milliseconds 200 }`,
+          `Get-Content -LiteralPath '${quotedLogFile}' -Encoding UTF8 -Tail 120 -Wait`,
+          ""
+        ].join("\r\n"),
+        { encoding: "utf8", mode: 0o600 }
       );
+      const quotedLauncherFile = escapePowerShellSingleQuoted(launcherFile);
+      launcher = spawn("powershell.exe", [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        `Start-Process -FilePath powershell.exe -ArgumentList @('-NoExit','-NoProfile','-ExecutionPolicy','Bypass','-File','${quotedLauncherFile}') -WindowStyle Normal`
+      ], {
+        cwd: job.workspaceRoot,
+        env: process.env,
+        detached: true,
+        stdio: "ignore",
+        windowsHide: false,
+      });
+      job.visibleTerminalLauncherFile = launcherFile;
     } else if (process.platform === "darwin") {
       const shellCommand = `printf '%s\\n' ${shellSingleQuote(`Claude Code visible log: ${title}`)}; tail -n 120 -f ${shellSingleQuote(logFile)}`;
       const script = [
@@ -1236,9 +1245,10 @@ function openVisibleLogTerminal(job, logFile) {
     launcher.unref();
     appendJobEvent(job.workspaceRoot, job.id, {
       type: "visible-terminal",
-      status: "opened",
+      status: "requested",
       title,
       logFile,
+      launcherFile: job.visibleTerminalLauncherFile ?? null,
     });
     appendLogLine(logFile, `Visible log terminal requested: ${title}`);
     patchJob(job.workspaceRoot, job.id, {
